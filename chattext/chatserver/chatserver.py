@@ -98,6 +98,9 @@ class Server():
             pid = os.fork()
             if pid > 0:
                 sys.exit(0)
+            os.chdir("/")
+            os.setsid()
+            os.umask(0)
             pid = os.fork()
             if pid > 0:
                 sys.exit(0)
