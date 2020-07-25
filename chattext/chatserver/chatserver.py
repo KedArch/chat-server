@@ -2,6 +2,7 @@
 
 import os
 import sys
+import ssl
 import socket
 import select
 import signal
@@ -9,22 +10,19 @@ import argparse
 import datetime
 import threading
 
-if os.name != "nt":
-    import readline
-
-basedir = os.path.dirname(os.path.realpath(sys.argv[0]))
-
 
 class Server():
     def __init__(self):
+        self.basedir = os.path.dirname(os.path.realpath(sys.argv[0]))
         self.host = "0.0.0.0"
         self.port = 1111
-        self.bufsiz = 4096
-        self.code = "utf8"
-        self.sname = "Serwer"
-        self.logtypes = ("SEP", "LOG", "CHAT")
+        self.timeout=10
+        self.sname = "Server"
+        self.welcome = "Welcome on this server!\nGive "\
+                       "yourself a nickname so others can recognize you!"
+        self.log = ("SEP", "LOG", "CHAT")
         self.logsep = 0
-        for i in self.logtypes:
+        for i in self.log:
             if len(i) > self.logsep:
                 self.logsep = len(i)
         signal.signal(signal.SIGTERM, self.exit)
@@ -32,32 +30,39 @@ class Server():
 
     def exit(self, signum, frame=""):
         try:
-            self.log("<<Logging ended at {}>>".format(
+            self.logging("<<Logging ended at {}>>".format(
                      str(datetime.datetime.now())),
-                     self.logtypes[0])
+                     self.log[0])
             self.logfile.close()
             self.server.close()
         finally:
             sys.exit(signum)
 
-    def log(self, text, logtype):
+    def logging(self, text, logtype):
+        longtext = str(datetime.datetime.now()) + "|"\
+                   + logtype.ljust(self.logsep) + "|"
         if self.args.log:
-            if logtype == self.logtypes[0]:
+            if logtype == self.log[0]:
                 self.logfile.write(text + "\n")
             else:
-                self.logfile.write(str(datetime.datetime.now()) + "|"
-                                   + logtype.ljust(self.logsep) + "|"
-                                   + text + "\n")
+                self.logfile.write(longtext + text + "\n")
             self.logfile.flush()
         if self.args.foreground:
-            if logtype == self.logtypes[0]:
+            if logtype == self.log[0]:
                 print(text)
             else:
-                print(str(datetime.datetime.now()) + "|"
-                      + logtype.ljust(self.logsep) + "|"
-                      + text)
+                print(longtext + text)
 
     def start(self):
+        if self.args.key:
+            self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            try:
+                self.context.load_cert_chain(certfile=self.args.cert,
+                                             keyfile=self.args.key,
+                                             password=self.args.password)
+            except ssl.SSLError:
+                print("Invalid cert/key/password")
+                sys.exit(67)
         if self.args.log:
             dirname = os.path.dirname(self.args.log)
             if os.path.exists(dirname) or dirname == "":
@@ -105,12 +110,13 @@ class Server():
             if pid > 0:
                 sys.exit(0)
         self.server.listen()
-        self.log("<<Logging started at {}>>".format(
+        self.logging("<<Logging started at {}>>".format(
                  str(datetime.datetime.now())),
-                 self.logtypes[0])
-        self.log("Waiting for connections...", self.logtypes[1])
-        accepting_thread = threading.Thread(name="Accepting connections",
-                                            target=self.accept_connections)
+                 self.log[0])
+        self.logging("Waiting for connections...", self.log[1])
+        accepting_thread = threading.Thread(
+                name="Accepting connections",
+                target=self.accept_connections)
         accepting_thread.daemon = 1
         accepting_thread.start()
         try:
@@ -119,12 +125,12 @@ class Server():
             self.exit(0)
 
     def send(self, data, client):
-        client.sendall(bytes(data, self.code))
+        client.sendall(bytes(data, "utf8"))
 
     def broadcast(self, data, prefix=""):
         if prefix == "":
             prefix = self.sname + ": "
-        self.log(prefix + data, self.logtypes[2])
+        self.logging(prefix + data, self.log[2])
         for sock in self.clients:
             try:
                 self.send(prefix + data, sock)
@@ -136,13 +142,17 @@ class Server():
                     f"Connection lost with {self.clients[sock]}.")
 
     def accept_connections(self):
-        while 1:
+        while True:
             client, address = self.server.accept()
-            self.log(f"{address[0]}:{address[1]} connected.", self.logtypes[1])
-            self.send(
-                "Welcome on this server!\nFor start give "
-                "yourself a nickname so anyone can recognize you!",
-                client)
+            if self.args.key:
+                try:
+                    client = self.context.wrap_socket(client, server_side=True)
+                except (ssl.SSLError, OSError):
+                    self.logging(f"{address[0]}:{address[1]} SSL handshake "
+                                 "failed or disconnected", self.log[1])
+                    continue
+            self.logging(f"{address[0]}:{address[1]} connected.", self.log[1])
+            self.send(self.welcome, client)
             self.addresses[client] = address
             handle_thread = threading.Thread(
                 name="Client: " + address[0] + str(address[1]),
@@ -151,7 +161,7 @@ class Server():
             handle_thread.start()
 
     def client_error(self, client, text, btext=""):
-        self.log(text, self.logtypes[1])
+        self.logging(text, self.log[1])
         del self.addresses[client]
         if client in self.clients:
             del self.clients[client]
@@ -159,13 +169,14 @@ class Server():
         client.close()
 
     def handle_connected(self, client):
+        client.settimeout(self.timeout)
         name = ""
         err = 0
-        while 1:
+        while True:
             try:
-                r, _, _ = select.select([client], [client], [client])
-                if r:
-                    data = client.recv(self.bufsiz).decode(self.code)
+                rdy, _, _ = select.select([client], [], [])
+                if rdy:
+                    data = client.recv(4096).decode("utf8")
                     if data == "":
                         raise ConnectionResetError
                     elif data == ":cn" or data == ":cn ":
@@ -177,32 +188,34 @@ class Server():
                         except IndexError:
                             continue
                         if name in self.clients.values():
-                            self.send("This nickname is already"
-                                      f" taken: {name}",
-                                      client)
+                            self.send(
+                                    "This nickname is already"
+                                    f" taken: {name}",
+                                    client)
                             name = oldname
                             continue
                         self.clients[client] = name
                         if oldname == "":
-                            self.log(
+                            self.logging(
                                 f"{self.addresses[client][0]}"
                                 f":{self.addresses[client][1]}"
-                                f" took nickname {name}", self.logtypes[1])
+                                f" took nickname {name}", self.log[1])
                             msg = f"{name} connected to chat!"
                         else:
-                            self.log(
+                            self.logging(
                                 f"{self.addresses[client][0]}"
                                 f":{self.addresses[client][1]}"
                                 f" changed nickname from {oldname} to {name}",
-                                self.logtypes[1])
+                                self.log[1])
                             msg = f"{oldname} changed nickname to {name}"
                         self.broadcast(msg)
                     elif data == ":h":
-                        self.send("List of available server commands:"
-                                  "\n:a - list all clients"
-                                  "\n:cn $nick - change nickname"
-                                  "\n:h - help",
-                                  client)
+                        self.send(
+                                "List of available server commands:"
+                                "\n:a - list all clients"
+                                "\n:cn $nick - change nickname"
+                                "\n:h - help",
+                                client)
                     elif data == ":a":
                         if self.clients:
                             self.send("Client list:", client)
@@ -234,43 +247,83 @@ class Server():
                     else:
                         self.broadcast(data, name + ": ")
             except (ConnectionAbortedError, ConnectionResetError):
-                self.client_error(client,
-                                  f"{self.addresses[client][0]}:"
-                                  f"{self.addresses[client][1]} disconnected.",
-                                  f"{name} left chat.")
+                self.client_error(
+                        client,
+                        f"{self.addresses[client][0]}:"
+                        f"{self.addresses[client][1]} disconnected.",
+                        f"{name} left chat.")
                 break
             except BrokenPipeError:
                 raise
-                self.client_error(client,
-                                  "Connection lost with "
-                                  f"{self.addresses[client][0]}:"
-                                  f"{self.addresses[client][1]} .",
-                                  f"Connection lost with {name}.")
+                self.client_error(
+                        client,
+                        "Connection lost with "
+                        f"{self.addresses[client][0]}:"
+                        f"{self.addresses[client][1]} .",
+                        f"Connection lost with {name}.")
                 break
             except ConnectionRefusedError:
-                self.client_error(client,
-                                  f"{self.addresses[client][0]}:"
-                                  f"{self.addresses[client][1]}"
-                                  " gave 3 times wrong command for nickname. "
-                                  "Either they didn't understand or it was "
-                                  "an attack.")
+                self.client_error(
+                        client,
+                        f"{self.addresses[client][0]}:"
+                        f"{self.addresses[client][1]}"
+                        " gave 3 times wrong command for nickname. "
+                        "Either they didn't understand or it was an attack.")
+                break
+            except UnicodeDecodeError:
+                self.client_error(
+                        client,
+                        f"{self.addresses[client][0]}:"
+                        f"{self.addresses[client][1]}"
+                        " sent invalid character and was disconnected.")
                 break
 
     def parse_args(self):
         parser = argparse.ArgumentParser(
-            description="Simple chat server.",
-            epilog="Error codes: 65 - log problems; 66 - socket problems")
-        parser.add_argument("-l", "--log", required=not {"-f", "--foreground"}
-                            & set(sys.argv) or {"-o", "--overwrite", "-a",
-                            "--append"} & set(sys.argv), help="log to file; "
-                            "required without -f")
-        parser.add_argument("-f", "--foreground", action="store_true",
-                            help="run in foreground instead")
-        loggroup = parser.add_mutually_exclusive_group()
-        loggroup.add_argument("-o", "--overwrite", action="store_true",
-                              help="overwrite log file")
-        loggroup.add_argument("-a", "--append", action="store_true",
-                              help="append to log file")
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            description="Simple chat server intended for personal use",
+            epilog="Error codes and their "
+                   "element:\n65 - log\n66 - socket\n67 - certfile or "
+                   "keyfile (or its password)")
+        parser.add_argument(
+                "-f", "--foreground", action="store_true",
+                help="run in foreground instead")
+        logparser = parser.add_argument_group(
+                title="Logging",
+                description="Simple logging system")
+        logparser.add_argument(
+                "-l", "--log",
+                required=not {"-f", "--foreground"} &
+                set(sys.argv) or {"-o", "--overwrite", "-a", "--append"} &
+                set(sys.argv),
+                help="log to file; required without -f")
+        loggroup = logparser.add_mutually_exclusive_group()
+        loggroup.add_argument(
+                "-o", "--overwrite", action="store_true",
+                help="overwrite log file")
+        loggroup.add_argument(
+                "-a", "--append", action="store_true",
+                help="append to log file")
+        tlsgroup = parser.add_argument_group(
+                title="SSL/TLS", description="Existence of this parameters "
+                "enables TLS/SSL of best version available to both client "
+                "and server.\nHere's example of simple key and cert generation"
+                " on openssl:\nopenssl req -new -newkey rsa:2048 -sha256 -days"
+                "365 -nodes -x509 -keyout server.key -out server.crt\n"
+                "Refer to openssl's or other documentation for more info.")
+        tlsgroup.add_argument(
+                "-k", "--key",
+                required={"-c", "--cert", "-p", "--password"} & set(sys.argv),
+                help="private key location")
+        tlsgroup.add_argument(
+                "-c", "--cert",
+                required={"-k", "--key"} & set(sys.argv),
+                help="certificate location")
+        tlsgroup.add_argument(
+                "-p", "--password",
+                help="password to private key. WARNING! This option is "
+                "insecure. If not given will be asked for it at server start "
+                "if needed.")
         self.args = parser.parse_args()
         self.start()
 
