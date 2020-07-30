@@ -16,10 +16,15 @@ class Server():
         self.basedir = os.path.dirname(os.path.realpath(sys.argv[0]))
         self.host = "0.0.0.0"
         self.port = 1111
-        self.timeout=10
+        self.timeout = 10
         self.sname = "Server"
         self.welcome = "Welcome on this server!\nGive "\
                        "yourself a nickname so others can recognize you!"
+        self.help = {
+                ":a": "list all clients",
+                ":cn": "change nickname",
+                ":h": "help",
+                }
         self.log = ("SEP", "LOG", "CHAT")
         self.logsep = 0
         for i in self.log:
@@ -194,6 +199,9 @@ class Server():
                                     client)
                             name = oldname
                             continue
+                        elif name == self.sname:
+                            self.send("You won't disguise as me!", client)
+                            continue
                         self.clients[client] = name
                         if oldname == "":
                             self.logging(
@@ -210,27 +218,24 @@ class Server():
                             msg = f"{oldname} changed nickname to {name}"
                         self.broadcast(msg)
                     elif data == ":h":
-                        self.send(
-                                "List of available server commands:"
-                                "\n:a - list all clients"
-                                "\n:cn $nick - change nickname"
-                                "\n:h - help",
-                                client)
+                        self.send("Server commands:\n", client)
+                        for i in self.help.keys():
+                            self.send(f"{i} - {self.help[i]}\n", client)
                     elif data == ":a":
                         if self.clients:
-                            self.send("Client list:", client)
+                            self.send("Client list:\n", client)
+                            self.send(f"*Server*> {self.sname}\n", client)
                             for nick in self.clients.values():
                                 if nick == list(self.clients.values())[-1]:
                                     if nick == name:
-                                        self.send("*You*>" + nick, client)
+                                        self.send(f"*You*> {nick}", client)
                                     else:
                                         self.send(nick, client)
                                 else:
                                     if nick == name:
-                                        self.send("*You*>" + nick
-                                                  + "\n", client)
+                                        self.send("*You*> {nick}\n", client)
                                     else:
-                                        self.send(nick + "\n", client)
+                                        self.send(f"{nick}\n", client)
                         else:
                             self.send("Nobody is on server.", client)
                     elif name == "":
