@@ -254,7 +254,7 @@ class Server():
                                         self.send(nick, client)
                                 else:
                                     if nick == name:
-                                        self.send("*You*> {nick}\n", client)
+                                        self.send(f"*You*> {nick}\n", client)
                                     else:
                                         self.send(f"{nick}\n", client)
                         else:
