@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-
+# Todo:
+# -timeout
+# -protocol
+# -users
+# -private messaging
+# -config
+# -commands
 import os
 import sys
 import ssl
-import socket
 import select
 import signal
+import socket
 import argparse
 import datetime
 import threading
@@ -16,7 +22,7 @@ class Server():
         self.basedir = os.path.dirname(os.path.realpath(sys.argv[0]))
         self.host = "0.0.0.0"
         self.port = 1111
-        self.timeout = 10
+        self.timeout = 10.0
         self.sname = "Server"
         self.welcome = "Welcome on this server!\nGive "\
                        "yourself a nickname so others can recognize you!"
@@ -195,12 +201,11 @@ class Server():
         client.close()
 
     def handle_connected(self, client):
-        client.settimeout(self.timeout)
         name = ""
         err = 0
         while True:
             try:
-                rdy, _, _ = select.select([client], [], [])
+                rdy, _, _ = select.select([client], [], [], self.timeout)
                 if rdy:
                     data = client.recv(4096).decode("utf8")
                     if data == "":
