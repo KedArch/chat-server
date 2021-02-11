@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # Todo:
 # -timeout
-# -protocol
 # -users
 # -private messaging
 # -config
@@ -9,6 +8,7 @@
 import os
 import sys
 import ssl
+import json
 import select
 import signal
 import socket
@@ -20,9 +20,11 @@ import threading
 class Server():
     def __init__(self):
         self.basedir = os.path.dirname(os.path.realpath(sys.argv[0]))
+        self.buffer = 4096
         self.host = "0.0.0.0"
         self.port = 1111
         self.timeout = 10.0
+        self.logfile = None
         self.sname = "Server"
         self.welcome = "Welcome on this server!\nGive "\
                        "yourself a nickname so others can recognize you!"
@@ -155,8 +157,17 @@ class Server():
         except EOFError:
             self.exit(0)
 
-    def send(self, data, client):
-        client.sendall(bytes(data, "utf8"))
+    def send(self, content, client, mtype="message",
+             attrib=None):
+        tmp = {
+            "type": mtype,
+            "attrib": attrib,
+            "content": content.strip()
+        }
+        data = json.dumps(tmp)
+        if not len(data) > 8*self.buffer//10:
+            data = data.ljust(self.buffer)
+            client.sendall(bytes(data, "utf8"))
 
     def broadcast(self, data, prefix=""):
         if prefix == "":
@@ -184,6 +195,17 @@ class Server():
                     continue
             self.logging(f"{address[0]}:{address[1]} connected.",
                          self.logtype[1])
+            client.sendall(bytes(str(self.buffer), "utf8"))
+            try:
+                response = json.loads(client.recv(self.buffer))
+                if not (response["type"] == "control" and
+                        response["attrib"] == "buffer" and
+                        response["content"] == f"ACK{self.buffer}"):
+                    raise json.JSONDecodeError
+            except Exception:
+                self.client_error(client, "Failed to communicate with "
+                                  f"{address[0]}:{address[1]}, disconnecting.")
+                continue
             self.send(self.welcome, client)
             self.addresses[client] = address
             handle_thread = threading.Thread(
@@ -194,7 +216,8 @@ class Server():
 
     def client_error(self, client, text, btext=""):
         self.logging(text, self.logtype[1])
-        del self.addresses[client]
+        if client in self.addresses:
+            del self.addresses[client]
         if client in self.clients:
             del self.clients[client]
             self.broadcast(btext)
@@ -207,76 +230,83 @@ class Server():
             try:
                 rdy, _, _ = select.select([client], [], [], self.timeout)
                 if rdy:
-                    data = client.recv(4096).decode("utf8")
+                    data = client.recv(self.buffer).decode("utf8")
                     if data == "":
                         raise ConnectionResetError
-                    elif data == ":cn" or data == ":cn ":
-                        self.send("Not enough arguments", client)
-                    elif data.split(" ", 1)[0] == ":cn":
-                        try:
-                            oldname = name
-                            name = data.split(" ", 1)[1]
-                        except IndexError:
+                    data = json.loads(data)
+                    if data["type"] == "message":
+                        if name == "":
+                            err += 1
+                            if err == 1:
+                                self.send("Type :h for help.", client)
+                            elif err == 2:
+                                self.send("Last chance. Type :h.", client)
+                            elif err == 3:
+                                raise ConnectionRefusedError
                             continue
-                        if name in self.clients.values():
-                            self.send(
-                                    "This nickname is already"
-                                    f" taken: {name}",
-                                    client)
-                            name = oldname
-                            continue
-                        elif name == self.sname:
-                            self.send("You won't disguise as me!", client)
-                            continue
-                        self.clients[client] = name
-                        if oldname == "":
-                            self.logging(
-                                f"{self.addresses[client][0]}"
-                                f":{self.addresses[client][1]}"
-                                f" took nickname {name}", self.logtype[1])
-                            msg = f"{name} connected to chat!"
-                        else:
-                            self.logging(
-                                f"{self.addresses[client][0]}"
-                                f":{self.addresses[client][1]}"
-                                f" changed nickname from {oldname} to {name}",
-                                self.logtype[1])
-                            msg = f"{oldname} changed nickname to {name}"
-                        self.broadcast(msg)
-                    elif data == ":h":
-                        self.send("Server commands:\n", client)
-                        for i in self.help.keys():
-                            self.send(f"{i} - {self.help[i]}\n", client)
-                    elif data == ":a":
-                        if self.clients:
-                            self.send("Client list:\n", client)
-                            self.send(f"*Server*> {self.sname}\n", client)
-                            for nick in self.clients.values():
-                                if nick == list(self.clients.values())[-1]:
-                                    if nick == name:
-                                        self.send(f"*You*> {nick}", client)
+                        self.broadcast(data["content"], name + ": ")
+                    if data["type"] == "privmsg":
+                        pass
+                    if data["type"] == "command":
+                        command = data["content"]
+                        if command.split(" ", 1)[0] == "cn":
+                            try:
+                                oldname = name
+                                name = command.split(" ", 1)[1]
+                            except IndexError:
+                                continue
+                            if name in self.clients.values():
+                                self.send(
+                                        "This nickname is already"
+                                        f" taken: {name}",
+                                        client)
+                                name = oldname
+                                continue
+                            elif name == self.sname:
+                                self.send("You won't disguise as me!", client)
+                                continue
+                            self.clients[client] = name
+                            if oldname == "":
+                                self.logging(
+                                    f"{self.addresses[client][0]}"
+                                    f":{self.addresses[client][1]}"
+                                    f" took nickname {name}", self.logtype[1])
+                                msg = f"{name} connected to chat!"
+                            else:
+                                self.logging(
+                                    f"{self.addresses[client][0]}"
+                                    f":{self.addresses[client][1]}"
+                                    f" changed nickname from {oldname} to "
+                                    "{name}",
+                                    self.logtype[1])
+                                msg = f"{oldname} changed nickname to {name}"
+                            self.broadcast(msg)
+                        elif command == "h":
+                            self.send("Server commands:\n", client)
+                            for i in self.help.keys():
+                                self.send(f"{i} - {self.help[i]}\n", client)
+                        elif command == "a":
+                            if self.clients:
+                                self.send("Client list:\n", client)
+                                self.send(f"*Server*> {self.sname}\n", client)
+                                for nick in self.clients.values():
+                                    if nick == list(self.clients.values())[-1]:
+                                        if nick == name:
+                                            self.send(f"*You*> {nick}", client)
+                                        else:
+                                            self.send(nick, client)
                                     else:
-                                        self.send(nick, client)
-                                else:
-                                    if nick == name:
-                                        self.send(f"*You*> {nick}\n", client)
-                                    else:
-                                        self.send(f"{nick}\n", client)
+                                        if nick == name:
+                                            self.send(f"*You*> {nick}\n",
+                                                      client)
+                                        else:
+                                            self.send(f"{nick}\n", client)
+                            else:
+                                self.send("Nobody is on server.", client)
                         else:
-                            self.send("Nobody is on server.", client)
-                    elif name == "":
-                        err += 1
-                        if err == 1:
-                            self.send("Type :h for help.", client)
-                        elif err == 2:
-                            self.send("Last chance. Type :h.", client)
-                        elif err == 3:
-                            raise ConnectionRefusedError
-                        continue
-                    elif data.startswith(":"):
-                        self.send(f"Unknown command: '{data}'", client)
-                    else:
-                        self.broadcast(data, name + ": ")
+                            self.send(f"Unknown command: ':{command}'", client)
+                    if data["type"] == "control":
+                        pass
             except (ConnectionAbortedError, ConnectionResetError):
                 self.client_error(
                         client,
@@ -301,12 +331,12 @@ class Server():
                         " gave 3 times wrong command for nickname. "
                         "Either they didn't understand or it was an attack.")
                 break
-            except UnicodeDecodeError:
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 self.client_error(
                         client,
                         f"{self.addresses[client][0]}:"
                         f"{self.addresses[client][1]}"
-                        " sent invalid character and was disconnected.")
+                        " sent invalid characters and was disconnected.")
                 break
 
 
