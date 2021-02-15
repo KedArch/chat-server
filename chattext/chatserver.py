@@ -9,9 +9,12 @@ import os
 import sys
 import ssl
 import json
+import shlex
 import select
 import signal
 import socket
+import sqlite3
+import hashlib
 import argparse
 import datetime
 import threading
@@ -20,20 +23,25 @@ import threading
 class Server():
     def __init__(self):
         self.basedir = os.path.dirname(os.path.realpath(sys.argv[0]))
-        self.buffer = 4096
+        self.buffer = 1024
         self.host = "0.0.0.0"
         self.port = 1111
         self.timeout = 10.0
         self.logfile = None
         self.sname = "Server"
+        self.reserved = set()
         self.welcome = "Welcome on this server!\nGive "\
-                       "yourself a nickname so others can recognize you!"
+                       "yourself a nickname or log in so others "\
+                       "can recognize you!"
         self.help = {
-                ":a": "list all clients",
-                ":cn": "change nickname",
-                ":h": "help",
+                "{csep}a": "list all clients",
+                "{csep}cn": "change nickname (saved if logged in)",
+                "{csep}l $user $pass": "log in",
+                "{csep}ca $user $pass": "create account",
+                "{csep}cap $pass $newpass": "change password (when logged in)",
+                "{csep}ra $pass $user": "remove account (when logged in)",
                 }
-        self.logtype = ("SEP", "LOG", "CHAT")
+        self.logtype = ("END", "LOG", "CHAT", "ERR")
         self.logsep = 0
         for i in self.logtype:
             if len(i) > self.logsep:
@@ -44,6 +52,9 @@ class Server():
 
     def exit(self, signum, frame=""):
         try:
+            if self.foreground:
+                print()
+            self.db_check(True)
             self.logging("<<Logging ended at {}>>".format(
                      str(datetime.datetime.now())),
                      self.logtype[0])
@@ -67,8 +78,79 @@ class Server():
             else:
                 print(longtext + text)
 
+    def db_check(self, close=False):
+        if not close:
+            try:
+                con = sqlite3.connect(
+                    self.basedir+os.path.sep+"users.db",
+                    check_same_thread=False)
+                cur = con.cursor()
+                try:
+                    for i in cur.execute("SELECT nick FROM users"):
+                        self.reserved.add(i[0])
+                except sqlite3.OperationalError:
+                    self.logging(
+                        "Database empty or corrupted, trying "
+                        "to create a new one.", self.logtype[1])
+                    cur.execute(
+                        "CREATE TABLE users (user text primary key "
+                        "unique, password text, sgroup text, nick text)")
+                    self.logging(
+                        "Initialized empty user database.", self.logtype[1])
+                except TypeError:
+                    pass
+                self.logging(
+                    "Loaded user database.", self.logtype[1])
+                con.commit()
+                self.db = (con, cur)
+            except (sqlite3.OperationalError):
+                self.logging(
+                    "Unable to access user database. Exiting...",
+                    self.logtype[3])
+                self.exit(69)
+            except IndexError:
+                self.logging(
+                    "Database corrupted. Exiting...",
+                    self.logtype[3])
+                self.exit(69)
+        else:
+            if os.path.isfile("users.db"):
+                self.db[0].commit()
+                self.db[0].close()
+                self.logging(
+                    "User database synchronized.",
+                    self.logtype[1])
+            else:
+                try:
+                    self.logging(
+                        "User database not available. Trying to recreate.",
+                        self.logtype[1])
+                    tempcon = sqlite3.connect("users.db")
+                    tempcur = tempcon.cursor()
+                    cur = self.db[1]
+                    tempcur.execute(
+                        "CREATE TABLE users (user text primary key "
+                        "unique, password text, sgroup text, nick text)")
+                    for i in cur.execute("SELECT * FROM users"):
+                        tempcur.execute(
+                            "INSERT INTO users VALUES (?, ?, ?, ?)", i)
+                    tempcon.commit()
+                    tempcon.close()
+                    self.db[0].close()
+                    self.logging(
+                        "Succesfully recreated and synchronized"
+                        " user database.",
+                        self.logtype[1])
+                except sqlite3.OperationalError:
+                    self.logging(
+                        "Couldn't recreate user database. Possibly data loss.",
+                        self.logtype[3])
+                    self.db[0].close()
+
     def start(self, foreground=False, log=None, overwrite=False, append=False,
               key=None, cert=None, passwd=None):
+        if not foreground and os.name == "nt":
+            print("Sorry, Windows needs foreground argument")
         if overwrite and append:
             print("You must select 'overwrite' OR 'append'")
             sys.exit(68)
@@ -103,9 +185,10 @@ class Server():
                     elif overwrite:
                         answer = "2"
                     else:
-                        print("Given log file exists. What to do?\n"
-                              "1 - append\n2 - overwrite\n"
-                              "anything else - exit")
+                        print(
+                            "Given log file exists. What to do?\n"
+                            "1 - append\n2 - overwrite\n"
+                            "anything else - exit")
                         answer = input("> ")
                     if answer == "1":
                         self.logfile = open(log, "a")
@@ -118,8 +201,9 @@ class Server():
             else:
                 print("Given log directory does not exists. Exiting...")
                 sys.exit(65)
+        self.foreground = foreground
+        self.log = log
         self.clients = {}
-        self.addresses = {}
         addr = (self.host, self.port)
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -140,12 +224,11 @@ class Server():
             pid = os.fork()
             if pid > 0:
                 sys.exit(0)
-        self.foreground = foreground
-        self.log = log
-        self.server.listen()
         self.logging("<<Logging started at {}>>".format(
                  str(datetime.datetime.now())),
                  self.logtype[0])
+        self.db_check()
+        self.server.listen()
         self.logging("Waiting for connections...", self.logtype[1])
         accepting_thread = threading.Thread(
                 name="Accepting connections",
@@ -165,7 +248,7 @@ class Server():
             "content": content.strip()
         }
         data = json.dumps(tmp)
-        if not len(data) > 8*self.buffer//10:
+        if not len(data) > int(self.buffer*0.8):
             data = data.ljust(self.buffer)
             client.sendall(bytes(data, "utf8"))
 
@@ -179,9 +262,9 @@ class Server():
             except BrokenPipeError:
                 self.client_error(
                     sock,
-                    f"Connection lost with {self.adresses[sock][0]}"
-                    f": {self.addresses[sock][1]}.",
-                    f"Connection lost with {self.clients[sock]}.")
+                    f"Connection lost with {self.clients[sock]['address'][0]}"
+                    f": {self.clients[sock]['address'][1]}.",
+                    f"Connection lost with {self.clients[sock]['name']}.")
 
     def accept_connections(self):
         while True:
@@ -190,8 +273,9 @@ class Server():
                 try:
                     client = self.context.wrap_socket(client, server_side=True)
                 except (ssl.SSLError, OSError):
-                    self.logging(f"{address[0]}:{address[1]} SSL handshake "
-                                 "failed or disconnected", self.logtype[1])
+                    self.logging(
+                        f"{address[0]}:{address[1]} SSL handshake "
+                        "failed or disconnected", self.logtype[1])
                     continue
             self.logging(f"{address[0]}:{address[1]} connected.",
                          self.logtype[1])
@@ -203,11 +287,16 @@ class Server():
                         response["content"] == f"ACK{self.buffer}"):
                     raise json.JSONDecodeError
             except Exception:
-                self.client_error(client, "Failed to communicate with "
-                                  f"{address[0]}:{address[1]}, disconnecting.")
+                self.client_error(
+                    client, "Failed to communicate with "
+                    f"{address[0]}:{address[1]}, disconnecting.")
                 continue
             self.send(self.welcome, client)
-            self.addresses[client] = address
+            self.clients[client] = {
+                "address": address,
+                "user": None,
+                "name": None,
+            }
             handle_thread = threading.Thread(
                 name="Client: " + address[0] + str(address[1]),
                 target=self.handle_connected, args=(client, ))
@@ -216,15 +305,227 @@ class Server():
 
     def client_error(self, client, text, btext=""):
         self.logging(text, self.logtype[1])
-        if client in self.addresses:
-            del self.addresses[client]
         if client in self.clients:
+            if self.clients[client]["name"]:
+                self.broadcast(btext)
+            if not self.clients[client]["user"]:
+                try:
+                    self.reserved.remove(self.clients[client]["name"])
+                except KeyError:
+                    pass
             del self.clients[client]
-            self.broadcast(btext)
         client.close()
 
+    def command_change_nickname(self, client, command):
+        try:
+            name = shlex.split(command)[1]
+        except IndexError:
+            return
+        if name in self.reserved:
+            self.send(
+                    "This nickname is already"
+                    f" taken: '{name}'",
+                    client)
+            return
+        elif not name:
+            self.send(
+                    "Invalid nickname",
+                    client)
+            return
+        elif name == self.sname:
+            self.send("You won't disguise as me!", client)
+            return
+        self.clients[client]["name"], name = name,\
+            self.clients[client]["name"]
+        if not name:
+            self.logging(
+                f"{self.clients[client]['address'][0]}"
+                f":{self.clients[client]['address'][1]}"
+                " took nickname "
+                f"'{self.clients[client]['name']}'",
+                self.logtype[1])
+            msg = f"'{self.clients[client]['name']}' "\
+                  "connected to chat!"
+        else:
+            self.logging(
+                f"{self.clients[client]['address'][0]}"
+                f":{self.clients[client]['address'][1]}"
+                f" changed nickname from '{name}'' to "
+                f"'{self.clients[client]['name']}'",
+                self.logtype[1])
+            msg = f"'{name}'' changed nickname to " + \
+                f"'{self.clients[client]['name']}'"
+        if not self.clients[client]['user'] and name:
+            self.reserved.remove(name)
+        self.reserved.add(self.clients[client]["name"])
+        self.broadcast(msg)
+
+    def command_help(self, client, command):
+        self.send("Server commands:\n", client)
+        for i in self.help.keys():
+            self.send(f"{i} - {self.help[i]}\n", client)
+        self.send(
+            "Arguments with '$' may be handled by client "
+            "differently:\n", client)
+
+    def command_list_all(self, client, command):
+        if self.clients:
+            self.send("Client list:\n", client)
+            self.send(f"Server    |{self.sname}\n", client)
+            names = list(self.reserved)
+            names.sort()
+            for nick in names:
+                if nick == self.clients[client]['name']:
+                    if not self.clients[client]['user']:
+                        self.send(
+                            f"You(Guest)|{nick}\n",
+                            client)
+                    else:
+                        self.send(
+                            f"You       |{nick}\n",
+                            client)
+                else:
+                    for i in self.clients.values():
+                        if i['name'] == nick:
+                            for j in self.db[1].execute(
+                                    "SELECT nick FROM users"):
+                                if nick == j[0]:
+                                    self.send(f"Guest     |{nick}\n", client)
+                            else:
+                                self.send(f"          |{nick}\n", client)
+                            break
+                    else:
+                        self.send(
+                            f"Offline   |{nick}\n",
+                            client)
+        else:
+            self.send("Nobody is on server.", client)
+
+    def command_login(self, client, command):
+        try:
+            user = shlex.split(command)[1]
+            password = hashlib.sha512(
+                bytes(shlex.split(command)[2],
+                      "utf8")).hexdigest()
+        except IndexError:
+            self.send("Not enough arguments", client)
+            return
+        for i in self.db[1].execute("SELECT user, password FROM users"):
+            if user == i[0] and password == i[1]:
+                self.send(
+                    "Succesfully logged in as user "
+                    f"'{user}'",
+                    client)
+                self.logging(
+                    f"{self.clients[client]['address'][0]}:"
+                    f"{self.clients[client]['address'][1]} "
+                    f"logged in as '{user}'",
+                    self.logtype[1])
+                if not self.clients[client]['user'] and\
+                        self.clients[client]['name']:
+                    self.reserved.remove(self.clients[client]['name'])
+                self.clients[client]['user'] = user
+                self.clients[client]['name'] = user
+                break
+        else:
+            self.send("Invalid username or password", client)
+
+    def command_create_account(self, client, command):
+        try:
+            user = shlex.split(command)[1]
+            password = hashlib.sha512(
+                bytes(shlex.split(command)[2], "utf8")).hexdigest()
+        except IndexError:
+            self.send("Not enough arguments", client)
+            return
+        for i in self.db[1].execute("SELECT user FROM users"):
+            if user == i[0]:
+                self.send(
+                    f"User already exist: '{user}'",
+                    client)
+                break
+        else:
+            self.db[1].execute(
+                f"INSERT INTO users VALUES ('{user}',"
+                f"'{password}','user','{user}')")
+            self.db[0].commit()
+            self.send(
+                f"User '{user}' succesfully created! "
+                "Logging in.",
+                client)
+            self.logging(
+                f"{self.clients[client]['address'][0]}:"
+                f"{self.clients[client]['address'][1]} "
+                f"created user '{user}'", self.logtype[1])
+            self.clients[client]['user'] = user
+            self.clients[client]['name'] = user
+            self.reserved.add(user)
+
+    def command_change_password(self, client, command):
+        if not self.clients[client]['user']:
+            self.send("You are not logged in!", client)
+            return
+        else:
+            try:
+                oldpass = hashlib.sha512(
+                    bytes(shlex.split(command)[1], "utf8")).hexdigest()
+                newpass = hashlib.sha512(
+                    bytes(shlex.split(command)[2], "utf8")).hexdigest()
+            except IndexError:
+                self.send("Not enough arguments", client)
+                return
+            if oldpass == self.db[1].execute(
+                    "SELECT password FROM users WHERE user = "
+                    f"'{self.clients[client]['user']}'").fetchone()[0]:
+                self.db[1].execute(
+                    "UPDATE users SET password = "
+                    f"'{newpass}' WHERE user = "
+                    f"'{self.clients[client]['user']}'")
+                self.db[0].commit()
+                self.send("Successfully changed password", client)
+                self.logging(
+                    f"{self.clients[client]['address'][0]}:"
+                    f"{self.clients[client]['address'][1]} "
+                    f"changed user '{self.clients[client]['user']}' "
+                    "password.",
+                    self.logtype[1])
+            else:
+                self.send("Invalid password", client)
+
+    def command_remove_account(self, client, command):
+        if not self.clients[client]['user']:
+            self.send("You are not logged in!", client)
+            return
+        else:
+            try:
+                password = hashlib.sha512(
+                    bytes(shlex.split(command)[1], "utf8")).hexdigest()
+                username = shlex.split(command)[2]
+            except IndexError:
+                self.send("Not enough arguments", client)
+                return
+            if password == self.db[1].execute(
+                    "SELECT password FROM users WHERE user = "
+                    f"'{self.clients[client]['user']}'").fetchone()[0] and\
+                    username == self.db[1].execute(
+                    "SELECT user FROM users WHERE user = "
+                    f"'{self.clients[client]['user']}'").fetchone()[0]:
+                self.db[1].execute(
+                    "DELETE FROM users "
+                    f"WHERE user = '{self.clients[client]['user']}'")
+                self.db[0].commit()
+                self.send("Successfully removed account", client)
+                self.logging(
+                    f"{self.clients[client]['address'][0]}:"
+                    f"{self.clients[client]['address'][1]} "
+                    f"removed user '{self.clients[client]['user']}' "
+                    "account.",
+                    self.logtype[1])
+                self.clients[client]['user'] = None
+            else:
+                self.send("Invalid password or username", client)
+
     def handle_connected(self, client):
-        name = ""
         err = 0
         while True:
             try:
@@ -235,108 +536,70 @@ class Server():
                         raise ConnectionResetError
                     data = json.loads(data)
                     if data["type"] == "message":
-                        if name == "":
+                        if not self.clients[client]["name"]:
                             err += 1
                             if err == 1:
-                                self.send("Type :h for help.", client)
+                                self.send("Type {csep}h for help.", client)
                             elif err == 2:
-                                self.send("Last chance. Type :h.", client)
+                                self.send("Last chance. Type {csep}h.", client)
                             elif err == 3:
                                 raise ConnectionRefusedError
                             continue
-                        self.broadcast(data["content"], name + ": ")
+                        self.broadcast(
+                            data["content"],
+                            self.clients[client]["name"] + ": ")
                     if data["type"] == "privmsg":
                         pass
                     if data["type"] == "command":
                         command = data["content"]
-                        if command.split(" ", 1)[0] == "cn":
-                            try:
-                                oldname = name
-                                name = command.split(" ", 1)[1]
-                            except IndexError:
-                                continue
-                            if name in self.clients.values():
-                                self.send(
-                                        "This nickname is already"
-                                        f" taken: {name}",
-                                        client)
-                                name = oldname
-                                continue
-                            elif name == self.sname:
-                                self.send("You won't disguise as me!", client)
-                                continue
-                            self.clients[client] = name
-                            if oldname == "":
-                                self.logging(
-                                    f"{self.addresses[client][0]}"
-                                    f":{self.addresses[client][1]}"
-                                    f" took nickname {name}", self.logtype[1])
-                                msg = f"{name} connected to chat!"
-                            else:
-                                self.logging(
-                                    f"{self.addresses[client][0]}"
-                                    f":{self.addresses[client][1]}"
-                                    f" changed nickname from {oldname} to "
-                                    "{name}",
-                                    self.logtype[1])
-                                msg = f"{oldname} changed nickname to {name}"
-                            self.broadcast(msg)
+                        if shlex.split(command)[0] == "cn":
+                            self.command_change_nickname(client, command)
                         elif command == "h":
-                            self.send("Server commands:\n", client)
-                            for i in self.help.keys():
-                                self.send(f"{i} - {self.help[i]}\n", client)
+                            self.command_help(client, command)
                         elif command == "a":
-                            if self.clients:
-                                self.send("Client list:\n", client)
-                                self.send(f"*Server*> {self.sname}\n", client)
-                                for nick in self.clients.values():
-                                    if nick == list(self.clients.values())[-1]:
-                                        if nick == name:
-                                            self.send(f"*You*> {nick}", client)
-                                        else:
-                                            self.send(nick, client)
-                                    else:
-                                        if nick == name:
-                                            self.send(f"*You*> {nick}\n",
-                                                      client)
-                                        else:
-                                            self.send(f"{nick}\n", client)
-                            else:
-                                self.send("Nobody is on server.", client)
+                            self.command_list_all(client, command)
+                        elif shlex.split(command)[0] == "l":
+                            self.command_login(client, command)
+                        elif shlex.split(command)[0] == "ca":
+                            self.command_create_account(client, command)
+                        elif shlex.split(command)[0] == "cap":
+                            self.command_change_password(client, command)
+                        elif shlex.split(command)[0] == "ra":
+                            self.command_remove_account(client, command)
                         else:
                             self.send(f"Unknown command: ':{command}'", client)
                     if data["type"] == "control":
                         pass
             except (ConnectionAbortedError, ConnectionResetError):
                 self.client_error(
-                        client,
-                        f"{self.addresses[client][0]}:"
-                        f"{self.addresses[client][1]} disconnected.",
-                        f"{name} left chat.")
+                    client,
+                    f"{self.clients[client]['address'][0]}:"
+                    f"{self.clients[client]['address'][1]} disconnected.",
+                    f"'{self.clients[client]['name']}' left chat.")
                 break
             except BrokenPipeError:
                 raise
                 self.client_error(
-                        client,
-                        "Connection lost with "
-                        f"{self.addresses[client][0]}:"
-                        f"{self.addresses[client][1]} .",
-                        f"Connection lost with {name}.")
+                    client,
+                    "Connection lost with "
+                    f"{self.clients[client]['address'][0]}:"
+                    f"{self.clients[client]['address'][1]} .",
+                    f"Connection lost with '{self.clients[client]['name']}'.")
                 break
             except ConnectionRefusedError:
                 self.client_error(
-                        client,
-                        f"{self.addresses[client][0]}:"
-                        f"{self.addresses[client][1]}"
-                        " gave 3 times wrong command for nickname. "
-                        "Either they didn't understand or it was an attack.")
+                    client,
+                    f"{self.clients[client]['address'][0]}:"
+                    f"{self.clients[client]['address'][1]}"
+                    " gave 3 times wrong command for nickname. "
+                    "Either they didn't understand or it was an attack.")
                 break
             except (UnicodeDecodeError, json.JSONDecodeError):
                 self.client_error(
-                        client,
-                        f"{self.addresses[client][0]}:"
-                        f"{self.addresses[client][1]}"
-                        " sent invalid characters and was disconnected.")
+                    client,
+                    f"{self.clients[client]['address'][0]}:"
+                    f"{self.clients[client]['address'][1]}"
+                    " sent invalid characters and was disconnected.")
                 break
 
 
@@ -346,50 +609,53 @@ def parse_args():
         description="Simple chat server intended for personal use",
         epilog="Error codes and their "
                "element:\n65 - log\n66 - socket\n67 - certfile or "
-               "keyfile (or its password)\n68 - mutually exclusive arguments")
+               "keyfile (or its password)\n68 - mutually exclusive arguments\n"
+               "69 - user database error")
     parser.add_argument(
-            "-f", "--foreground", action="store_true",
-            help="run in foreground instead")
+        "-f", "--foreground", action="store_true",
+        required=not {"-l", "--log"} &
+        set(sys.argv),
+        help="run in foreground instead (required on Windows)")
     logparser = parser.add_argument_group(
-            title="Logging",
-            description="Simple logging system")
+        title="Logging",
+        description="Simple logging system")
     logparser.add_argument(
-            "-l", "--log",
-            required=not {"-f", "--foreground"} &
-            set(sys.argv) or {"-o", "--overwrite", "-a", "--append"} &
-            set(sys.argv),
-            help="log to file; required without -f")
+        "-l", "--log",
+        required=not {"-f", "--foreground"} &
+        set(sys.argv) or {"-o", "--overwrite", "-a", "--append"} &
+        set(sys.argv),
+        help="log to file; required without -f")
     loggroup = logparser.add_mutually_exclusive_group()
     loggroup.add_argument(
-            "-o", "--overwrite", action="store_true",
-            help="overwrite log file")
+        "-o", "--overwrite", action="store_true",
+        help="overwrite log file")
     loggroup.add_argument(
-            "-a", "--append", action="store_true",
-            help="append to log file")
+        "-a", "--append", action="store_true",
+        help="append to log file")
     tlsgroup = parser.add_argument_group(
-            title="SSL/TLS", description="Existence of this parameters "
-            "enables TLS/SSL of best version available to both client "
-            "and server.\nHere's example of simple key and cert generation"
-            " on openssl:\nopenssl req -new -newkey rsa:2048 -sha256 -days"
-            "365 -nodes -x509 -keyout server.key -out server.crt\n"
-            "Refer to openssl's or other documentation for more info.")
+        title="SSL/TLS", description="Existence of this parameters "
+        "enables TLS/SSL of best version available to both client "
+        "and server.\nHere's example of simple key and cert generation"
+        " on openssl:\nopenssl req -new -newkey rsa:2048 -sha512 -days"
+        "365 -nodes -x509 -keyout server.key -out server.crt\n"
+        "Refer to openssl's or other documentation for more info.")
     tlsgroup.add_argument(
-            "-k", "--key",
-            required={"-c", "--cert", "-p", "--passwd"} & set(sys.argv),
-            help="private key location")
+        "-k", "--key",
+        required={"-c", "--cert", "-p", "--passwd"} & set(sys.argv),
+        help="private key location")
     tlsgroup.add_argument(
-            "-c", "--cert",
-            required={"-k", "--key"} & set(sys.argv),
-            help="certificate location")
+        "-c", "--cert",
+        required={"-k", "--key"} & set(sys.argv),
+        help="certificate location")
     tlsgroup.add_argument(
-            "-p", "--passwd",
-            help="password to private key. WARNING! This option is "
-            "insecure. If not given will be asked for it at server start "
-            "if needed.")
+        "-p", "--passwd",
+        help="password to private key. WARNING! This option is "
+        "insecure. If not given will be asked for it at server start "
+        "if needed.")
     args = parser.parse_args()
     Server().start(
-            args.foreground, args.log, args.overwrite, args.append,
-            args.key, args.cert, args.passwd)
+        args.foreground, args.log, args.overwrite, args.append,
+        args.key, args.cert, args.passwd)
 
 
 if __name__ == "__main__":
