@@ -463,9 +463,15 @@ class Server():
                     client)
                 break
         else:
-            self.db[1].execute(
-                f"INSERT INTO users VALUES ('{user}',"
-                f"'{password}','user','{user}')")
+            try:
+                self.db[1].execute(
+                    f"INSERT INTO users VALUES ('{user}',"
+                    f"'{password}','user','{user}')")
+            except sqlite3.OperationalError:
+                self.send(
+                    f"Could not create user '{user}'.",
+                    client)
+                return
             self.db[0].commit()
             self.send(
                 f"User '{user}' succesfully created! "
