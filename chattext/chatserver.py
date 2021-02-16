@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 # Todo:
-# -timeout
-# -private messaging
 # -config
 # -commands
 import os
@@ -22,10 +20,10 @@ import threading
 class Server():
     def __init__(self):
         self.basedir = os.path.dirname(os.path.realpath(sys.argv[0]))
-        self.buffer = 1024
+        self.buffer = 1024  # Better if >= 512 and <= 2048
         self.host = "0.0.0.0"
         self.port = 1111
-        self.timeout = 10.0
+        self.timeout = 60.0  # Better if >= 30.0
         self.logfile = None
         self.sname = "Server"
         self.reserved = set()
@@ -39,6 +37,8 @@ class Server():
                 "{csep}ca $user $pass": "create account",
                 "{csep}cap $pass $newpass": "change password (when logged in)",
                 "{csep}ra $pass $user": "remove account (when logged in)",
+                "{csep}pm $nick $message": "send private message to someone "
+                                           "online (also to guests)"
                 }
         self.logtype = ("END", "LOG", "CHAT", "ERR")
         self.logsep = 0
@@ -241,7 +241,7 @@ class Server():
             self.exit(0)
 
     def send(self, content, client, mtype="message",
-             attrib=None):
+             attrib=[]):
         tmp = {
             "type": mtype,
             "attrib": attrib,
@@ -252,14 +252,15 @@ class Server():
             data = data.ljust(self.buffer)
             client.sendall(bytes(data, "utf8"))
 
-    def broadcast(self, data, prefix=""):
+    def broadcast(self, data, prefix="", omit=False):
         if prefix == "":
             prefix = self.sname + ": "
         self.logging(prefix + data, self.logtype[2])
         errcl = []
         for sock in self.clients:
             try:
-                self.send(prefix + data, sock)
+                if not omit:
+                    self.send(prefix + data, sock)
             except BrokenPipeError:
                 errcl.append(sock)
         for sock in errcl:
@@ -284,11 +285,18 @@ class Server():
                          self.logtype[1])
             client.sendall(bytes(str(self.buffer), "utf8"))
             try:
-                response = json.loads(client.recv(self.buffer))
-                if not (response["type"] == "control" and
-                        response["attrib"] == "buffer" and
-                        response["content"] == f"ACK{self.buffer}"):
-                    raise json.JSONDecodeError
+                rdy, _, _ = select.select([client], [], [], self.timeout/2)
+                if rdy:
+                    response = json.loads(client.recv(self.buffer))
+                    if not (response["type"] == "control" and
+                            "buffer" in response["attrib"] and
+                            response["content"] == f"ACK{self.buffer}"):
+                        raise json.JSONDecodeError
+                    self.send(
+                        str(self.timeout), client,
+                        "control", ["timeout"])
+                else:
+                    raise ConnectionRefusedError
             except Exception:
                 self.client_error(
                     client, "Failed to communicate with "
@@ -310,7 +318,7 @@ class Server():
         self.logging(text, self.logtype[1])
         if client in self.clients:
             if self.clients[client]["name"]:
-                self.broadcast(btext)
+                self.broadcast(btext, omit=True)
             if not self.clients[client]["user"]:
                 try:
                     self.reserved.remove(self.clients[client]["name"])
@@ -367,7 +375,7 @@ class Server():
         self.send("Server commands:\n", client)
         for i in self.help.keys():
             self.send(f"{i} - {self.help[i]}\n", client,
-                      "message", "csep")
+                      "message", ["csep"])
         self.send(
             "Arguments with '$' may be handled by client "
             "differently:\n", client)
@@ -394,9 +402,10 @@ class Server():
                             for j in self.db[1].execute(
                                     "SELECT nick FROM users"):
                                 if nick == j[0]:
-                                    self.send(f"Guest     |{nick}\n", client)
+                                    self.send(f"Online    |{nick}\n", client)
+                                    break
                             else:
-                                self.send(f"          |{nick}\n", client)
+                                self.send(f"Guest     |{nick}\n", client)
                             break
                     else:
                         self.send(
@@ -427,7 +436,12 @@ class Server():
                     self.logtype[1])
                 if not self.clients[client]['user'] and\
                         self.clients[client]['name']:
+                    self.broadcast(
+                        f"'{self.clients[client]['name']}' "
+                        f"logged in as '{user}'.")
                     self.reserved.remove(self.clients[client]['name'])
+                else:
+                    self.broadcast(f"'{user}' logged in.")
                 self.clients[client]['user'] = user
                 self.clients[client]['name'] = user
                 break
@@ -461,6 +475,14 @@ class Server():
                 f"{self.clients[client]['address'][0]}:"
                 f"{self.clients[client]['address'][1]} "
                 f"created user '{user}'", self.logtype[1])
+            if not self.clients[client]['user'] and\
+                    self.clients[client]['name']:
+                self.broadcast(
+                    f"'{self.clients[client]['name']}' "
+                    f"logged in as '{user}'.")
+                self.reserved.remove(self.clients[client]['name'])
+            else:
+                self.broadcast(f"'{user}' logged in.")
             self.clients[client]['user'] = user
             self.clients[client]['name'] = user
             self.reserved.add(user)
@@ -529,11 +551,30 @@ class Server():
             else:
                 self.send("Invalid password or username", client)
 
+    def command_private_message(self, client, command):
+        nick = command.split()[1]
+        if nick == self.clients[client]['name']:
+            self.send(
+                "It would be funny to send messages to lonely self but no",
+                client)
+            return
+        for i in self.clients.items():
+            if i[1]['name'] == nick:
+                priv = i[0]
+                break
+        else:
+            self.send(f"{nick} is unavailable!", client)
+            return
+        message = command[len(command.split()[0])+len(command.split()[1])+2:]
+        self.send(f"(priv)|{self.clients[client]['name']}: {message}", priv)
+        self.send(f"(priv)|{self.clients[client]['name']}: {message}", client)
+
     def handle_connected(self, client):
         err = 0
+        timeout = False
         while True:
             try:
-                rdy, _, _ = select.select([client], [], [], self.timeout)
+                rdy, _, _ = select.select([client], [], [], self.timeout/2)
                 if rdy:
                     data = client.recv(self.buffer).decode("utf8")
                     if data == "":
@@ -566,14 +607,33 @@ class Server():
                             self.command_login(client, command)
                         elif shlex.split(command)[0] == "ca":
                             self.command_create_account(client, command)
+                        elif not self.clients[client]["name"]:
+                            err += 1
+                            if err == 1:
+                                self.send("Type {csep}h for help.", client)
+                            elif err == 2:
+                                self.send("Last chance. Type {csep}h.", client)
+                            elif err == 3:
+                                raise ConnectionRefusedError
+                            continue
                         elif shlex.split(command)[0] == "cap":
                             self.command_change_password(client, command)
                         elif shlex.split(command)[0] == "ra":
                             self.command_remove_account(client, command)
+                        elif shlex.split(command)[0] == "pm":
+                            self.command_private_message(client, command)
                         else:
                             self.send(f"Unknown command: ':{command}'", client)
                     if data["type"] == "control":
-                        pass
+                        if "alive" in data["attrib"]:
+                            pass
+                    timeout = False
+                else:
+                    if timeout:
+                        raise ConnectionError
+                    else:
+                        self.send("", client, "control", ["alive"])
+                        timeout = True
             except (ConnectionAbortedError, ConnectionResetError):
                 self.client_error(
                     client,
@@ -604,6 +664,14 @@ class Server():
                     f"{self.clients[client]['address'][0]}:"
                     f"{self.clients[client]['address'][1]}"
                     " sent invalid characters and was disconnected.")
+                break
+            except ConnectionError:
+                self.client_error(
+                    client,
+                    f"{self.clients[client]['address'][0]}:"
+                    f"{self.clients[client]['address'][1]} hit timeout "
+                    "limit and was disconnected.",
+                    f"'{self.clients[client]['name']}' timed out.")
                 break
 
 
