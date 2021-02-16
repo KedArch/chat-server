@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # Todo:
 # -timeout
-# -users
 # -private messaging
 # -config
 # -commands
@@ -114,7 +113,7 @@ class Server():
                     self.logtype[3])
                 self.exit(69)
         else:
-            if os.path.isfile("users.db"):
+            if os.path.isfile(self.basedir+os.path.sep+"users.db"):
                 self.db[0].commit()
                 self.db[0].close()
                 self.logging(
@@ -125,7 +124,8 @@ class Server():
                     self.logging(
                         "User database not available. Trying to recreate.",
                         self.logtype[1])
-                    tempcon = sqlite3.connect("users.db")
+                    tempcon = sqlite3.connect(
+                            self.basedir+os.path.sep+"users.db")
                     tempcur = tempcon.cursor()
                     cur = self.db[1]
                     tempcur.execute(
