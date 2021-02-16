@@ -256,15 +256,18 @@ class Server():
         if prefix == "":
             prefix = self.sname + ": "
         self.logging(prefix + data, self.logtype[2])
+        errcl = []
         for sock in self.clients:
             try:
                 self.send(prefix + data, sock)
             except BrokenPipeError:
-                self.client_error(
-                    sock,
-                    f"Connection lost with {self.clients[sock]['address'][0]}"
-                    f": {self.clients[sock]['address'][1]}.",
-                    f"Connection lost with {self.clients[sock]['name']}.")
+                errcl.append(sock)
+        for sock in errcl:
+            self.client_error(
+                sock,
+                f"Connection lost with {self.clients[sock]['address'][0]}"
+                f": {self.clients[sock]['address'][1]}.",
+                f"Connection lost with {self.clients[sock]['name']}.")
 
     def accept_connections(self):
         while True:
@@ -363,7 +366,8 @@ class Server():
     def command_help(self, client, command):
         self.send("Server commands:\n", client)
         for i in self.help.keys():
-            self.send(f"{i} - {self.help[i]}\n", client)
+            self.send(f"{i} - {self.help[i]}\n", client,
+                      "message", "csep")
         self.send(
             "Arguments with '$' may be handled by client "
             "differently:\n", client)
