@@ -31,15 +31,15 @@ class Server():
                        "yourself a nickname or log in so others "\
                        "can recognize you!"
         self.help = {
-                "{csep}a": "list all clients",
-                "{csep}cn": "change nickname (saved if logged in)",
-                "{csep}l $user $pass": "log in",
-                "{csep}ca $user $pass": "create account",
-                "{csep}cap $pass $newpass": "change password (when logged in)",
-                "{csep}ra $pass $user": "remove account (when logged in)",
-                "{csep}pm $nick $message": "send private message to someone "
-                                           "online (also to guests)"
-                }
+            "{csep}a": "list all clients",
+            "{csep}cn": "change nickname (saved if logged in)",
+            "{csep}l $user $pass": "log in",
+            "{csep}ca $user $pass": "create account",
+            "{csep}cap $pass $newpass": "change password (when logged in)",
+            "{csep}ra $pass $user": "remove account (when logged in)",
+            "{csep}pm $nick $message": "send private message to someone "
+            "online (also to guests)"
+        }
         self.logtype = ("END", "LOG", "CHAT", "ERR")
         self.logsep = 0
         for i in self.logtype:
@@ -55,8 +55,8 @@ class Server():
                 print()
             self.db_check(True)
             self.logging("<<Logging ended at {}>>".format(
-                     str(datetime.datetime.now())),
-                     self.logtype[0])
+                str(datetime.datetime.now())),
+                self.logtype[0])
             self.logfile.close()
             self.server.close()
         finally:
@@ -64,7 +64,7 @@ class Server():
 
     def logging(self, text, logtype):
         longtext = str(datetime.datetime.now()) + "|"\
-                   + logtype.ljust(self.logsep) + "|"
+            + logtype.ljust(self.logsep) + "|"
         if self.log:
             if logtype == self.logtype[0]:
                 self.logfile.write(text + "\n")
@@ -125,7 +125,7 @@ class Server():
                         "User database not available. Trying to recreate.",
                         self.logtype[1])
                     tempcon = sqlite3.connect(
-                            self.basedir+os.path.sep+"users.db")
+                        self.basedir+os.path.sep+"users.db")
                     tempcur = tempcon.cursor()
                     cur = self.db[1]
                     tempcur.execute(
@@ -225,14 +225,14 @@ class Server():
             if pid > 0:
                 sys.exit(0)
         self.logging("<<Logging started at {}>>".format(
-                 str(datetime.datetime.now())),
-                 self.logtype[0])
+            str(datetime.datetime.now())),
+            self.logtype[0])
         self.db_check()
         self.server.listen()
         self.logging("Waiting for connections...", self.logtype[1])
         accepting_thread = threading.Thread(
-                name="Accepting connections",
-                target=self.accept_connections)
+            name="Accepting connections",
+            target=self.accept_connections)
         accepting_thread.daemon = 1
         accepting_thread.start()
         try:
@@ -334,14 +334,14 @@ class Server():
             return
         if name in self.reserved:
             self.send(
-                    "This nickname is already"
-                    f" taken: '{name}'",
-                    client)
+                "This nickname is already"
+                f" taken: '{name}'",
+                client)
             return
         elif not name:
             self.send(
-                    "Invalid nickname",
-                    client)
+                "Invalid nickname",
+                client)
             return
         elif name == self.sname:
             self.send("You won't disguise as me!", client)
@@ -590,9 +590,13 @@ class Server():
                         if not self.clients[client]["name"]:
                             err += 1
                             if err == 1:
-                                self.send("Type {csep}h for help.", client)
+                                self.send(
+                                    "Type {csep}h for help.",
+                                    client, attrib=["csep"])
                             elif err == 2:
-                                self.send("Last chance. Type {csep}h.", client)
+                                self.send(
+                                    "Last chance. Type {csep}h.",
+                                    client, attrib=["csep"])
                             elif err == 3:
                                 raise ConnectionRefusedError
                             continue
@@ -616,9 +620,13 @@ class Server():
                         elif not self.clients[client]["name"]:
                             err += 1
                             if err == 1:
-                                self.send("Type {csep}h for help.", client)
+                                self.send(
+                                    "Type {csep}h for help.",
+                                    client, attrib=["csep"])
                             elif err == 2:
-                                self.send("Last chance. Type {csep}h.", client)
+                                self.send(
+                                    "Last chance. Type {csep}h.",
+                                    client, attrib=["csep"])
                             elif err == 3:
                                 raise ConnectionRefusedError
                             continue
