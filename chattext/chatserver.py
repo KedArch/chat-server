@@ -49,7 +49,7 @@ class Server():
         signal.signal(signal.SIGTERM, self.exit)
         signal.signal(signal.SIGINT, self.exit)
 
-    def exit(self, signum, frame=""):
+    def exit(self, signum, frame=None):
         try:
             if self.foreground:
                 print()
@@ -178,7 +178,7 @@ class Server():
                 sys.exit(67)
         if log:
             dirname = os.path.dirname(log)
-            if os.path.exists(dirname) or dirname == "":
+            if os.path.exists(dirname) or not dirname:
                 if os.path.exists(log):
                     if append:
                         answer = "1"
@@ -252,8 +252,8 @@ class Server():
             data = data.ljust(self.buffer)
             client.sendall(bytes(data, "utf8"))
 
-    def broadcast(self, data, prefix="", omit=False):
-        if prefix == "":
+    def broadcast(self, data, prefix=None, omit=False):
+        if not prefix:
             prefix = self.sname + ": "
         self.logging(prefix + data, self.logtype[2])
         errcl = []
@@ -361,12 +361,23 @@ class Server():
             self.logging(
                 f"{self.clients[client]['address'][0]}"
                 f":{self.clients[client]['address'][1]}"
-                f" changed nickname from '{name}'' to "
+                f" changed nickname from '{name}' to "
                 f"'{self.clients[client]['name']}'",
                 self.logtype[1])
-            msg = f"'{name}'' changed nickname to " + \
+            msg = f"'{name}' changed nickname to " + \
                 f"'{self.clients[client]['name']}'"
-        if not self.clients[client]['user'] and name:
+        if self.clients[client]['user']:
+            try:
+                self.db[1].execute(
+                    "UPDATE users SET nick = "
+                    f"'{self.clients[client]['name']}' WHERE user = "
+                    f"'{self.clients[client]['user']}'")
+            except sqlite3.OperationalError:
+                self.send(
+                    "Couldn't manipulate user database!"
+                    " (Internal server error)",
+                    client)
+        if name in self.reserved:
             self.reserved.remove(name)
         self.reserved.add(self.clients[client]["name"])
         self.broadcast(msg)
@@ -423,27 +434,28 @@ class Server():
         except IndexError:
             self.send("Not enough arguments", client)
             return
-        for i in self.db[1].execute("SELECT user, password FROM users"):
+        for i in self.db[1].execute("SELECT user, password, nick FROM users"):
             if user == i[0] and password == i[1]:
                 self.send(
                     "Succesfully logged in as user "
-                    f"'{user}'",
+                    f"'{user}' aka '{i[2]}'",
                     client)
                 self.logging(
                     f"{self.clients[client]['address'][0]}:"
                     f"{self.clients[client]['address'][1]} "
-                    f"logged in as '{user}'",
+                    f"logged in as '{user}'"
+                    f" aka '{i[2]}",
                     self.logtype[1])
                 if not self.clients[client]['user'] and\
                         self.clients[client]['name']:
                     self.broadcast(
                         f"'{self.clients[client]['name']}' "
-                        f"logged in as '{user}'.")
+                        f"logged in as '{i[2]}'.")
                     self.reserved.remove(self.clients[client]['name'])
                 else:
-                    self.broadcast(f"'{user}' logged in.")
+                    self.broadcast(f"'{i[2]}' logged in.")
                 self.clients[client]['user'] = user
-                self.clients[client]['name'] = user
+                self.clients[client]['name'] = i[2]
                 break
         else:
             self.send("Invalid username or password", client)
@@ -509,10 +521,17 @@ class Server():
             if oldpass == self.db[1].execute(
                     "SELECT password FROM users WHERE user = "
                     f"'{self.clients[client]['user']}'").fetchone()[0]:
-                self.db[1].execute(
-                    "UPDATE users SET password = "
-                    f"'{newpass}' WHERE user = "
-                    f"'{self.clients[client]['user']}'")
+                try:
+                    self.db[1].execute(
+                        "UPDATE users SET password = "
+                        f"'{newpass}' WHERE user = "
+                        f"'{self.clients[client]['user']}'")
+                except sqlite3.OperationalError:
+                    self.send(
+                        "Couldn't manipulate user database!"
+                        " (Internal server error)",
+                        client)
+                    return
                 self.db[0].commit()
                 self.send("Successfully changed password", client)
                 self.logging(
@@ -542,9 +561,16 @@ class Server():
                     username == self.db[1].execute(
                     "SELECT user FROM users WHERE user = "
                     f"'{self.clients[client]['user']}'").fetchone()[0]:
-                self.db[1].execute(
-                    "DELETE FROM users "
-                    f"WHERE user = '{self.clients[client]['user']}'")
+                try:
+                    self.db[1].execute(
+                        "DELETE FROM users "
+                        f"WHERE user = '{self.clients[client]['user']}'")
+                except sqlite3.OperationalError:
+                    self.send(
+                        "Couldn't manipulate user database!"
+                        " (Internal server error)",
+                        client)
+                    return
                 self.db[0].commit()
                 self.send("Successfully removed account", client)
                 self.logging(
@@ -583,7 +609,7 @@ class Server():
                 rdy, _, _ = select.select([client], [], [], self.timeout/2)
                 if rdy:
                     data = client.recv(self.buffer).decode("utf8")
-                    if data == "":
+                    if not data:
                         raise ConnectionResetError
                     data = json.loads(data)
                     if data["type"] == "message":
