@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# Todo:
-# -config
-# -commands
 import os
 import sys
 import ssl
@@ -18,6 +15,9 @@ import threading
 
 
 class Server():
+    """
+    Main server class
+    """
     def __init__(self):
         self.basedir = os.path.dirname(os.path.realpath(sys.argv[0]))
         self.buffer = 1024  # Better if >= 512 and <= 2048
@@ -50,6 +50,9 @@ class Server():
         signal.signal(signal.SIGINT, self.exit)
 
     def exit(self, signum, frame=None):
+        """
+        Handles exit signal
+        """
         try:
             if self.foreground:
                 print()
@@ -63,6 +66,9 @@ class Server():
             sys.exit(signum)
 
     def logging(self, text, logtype):
+        """
+        Formats logging messages
+        """
         longtext = str(datetime.datetime.now()) + "|"\
             + logtype.ljust(self.logsep) + "|"
         if self.log:
@@ -78,6 +84,9 @@ class Server():
                 print(longtext + text)
 
     def db_check(self, close=False):
+        """
+        Check database at server start and stop
+        """
         if not close:
             try:
                 con = sqlite3.connect(
@@ -149,6 +158,9 @@ class Server():
 
     def start(self, foreground=False, log=None, overwrite=False, append=False,
               key=None, cert=None, passwd=None):
+        """
+        Checks conditions and initializes server
+        """
         if not foreground and os.name == "nt":
             print("Sorry, Windows needs foreground argument")
         if overwrite and append:
@@ -242,6 +254,9 @@ class Server():
 
     def send(self, content, client, mtype="message",
              attrib=[]):
+        """
+        Handles message sending with correct protocol
+        """
         tmp = {
             "type": mtype,
             "attrib": attrib,
@@ -253,6 +268,9 @@ class Server():
             client.sendall(bytes(data, "utf8"))
 
     def broadcast(self, data, prefix=None, omit=False):
+        """
+        Broadcasts message to all clients
+        """
         if not prefix:
             prefix = self.sname + ": "
         self.logging(prefix + data, self.logtype[2])
@@ -271,6 +289,9 @@ class Server():
                 f"Connection lost with {self.clients[sock]['name']}.")
 
     def accept_connections(self):
+        """
+        Handles first time connection
+        """
         while True:
             client, address = self.server.accept()
             if self.context:
@@ -315,6 +336,9 @@ class Server():
             handle_thread.start()
 
     def client_error(self, client, text, btext=""):
+        """
+        Clears variables after client error
+        """
         self.logging(text, self.logtype[1])
         if client in self.clients:
             if self.clients[client]["name"]:
@@ -328,6 +352,9 @@ class Server():
         client.close()
 
     def command_change_nickname(self, client, command):
+        """
+        Command functionality
+        """
         try:
             name = shlex.split(command)[1]
         except IndexError:
@@ -383,6 +410,9 @@ class Server():
         self.broadcast(msg)
 
     def command_help(self, client, command):
+        """
+        Command functionality
+        """
         self.send("Server commands:\n", client)
         for i in self.help.keys():
             self.send(f"{i} - {self.help[i]}\n", client,
@@ -392,6 +422,9 @@ class Server():
             "differently:\n", client)
 
     def command_list_all(self, client, command):
+        """
+        Command functionality
+        """
         if self.clients:
             self.send("Client list:\n", client)
             self.send(f"Server    |{self.sname}\n", client)
@@ -426,6 +459,9 @@ class Server():
             self.send("Nobody is on server.", client)
 
     def command_login(self, client, command):
+        """
+        Command functionality
+        """
         try:
             user = shlex.split(command)[1]
             password = hashlib.sha512(
@@ -461,6 +497,9 @@ class Server():
             self.send("Invalid username or password", client)
 
     def command_create_account(self, client, command):
+        """
+        Command functionality
+        """
         try:
             user = shlex.split(command)[1]
             password = hashlib.sha512(
@@ -506,6 +545,9 @@ class Server():
             self.reserved.add(user)
 
     def command_change_password(self, client, command):
+        """
+        Command functionality
+        """
         if not self.clients[client]['user']:
             self.send("You are not logged in!", client)
             return
@@ -544,6 +586,9 @@ class Server():
                 self.send("Invalid password", client)
 
     def command_remove_account(self, client, command):
+        """
+        Command functionality
+        """
         if not self.clients[client]['user']:
             self.send("You are not logged in!", client)
             return
@@ -584,6 +629,9 @@ class Server():
                 self.send("Invalid password or username", client)
 
     def command_private_message(self, client, command):
+        """
+        Command functionality
+        """
         nick = command.split()[1]
         if nick == self.clients[client]['name']:
             self.send(
@@ -602,6 +650,9 @@ class Server():
         self.send(f"(priv)|{self.clients[client]['name']}: {message}", client)
 
     def handle_connected(self, client):
+        """
+        Serves client output
+        """
         err = 0
         timeout = False
         while True:
@@ -629,8 +680,6 @@ class Server():
                         self.broadcast(
                             data["content"],
                             self.clients[client]["name"] + ": ")
-                    if data["type"] == "privmsg":
-                        pass
                     if data["type"] == "command":
                         command = data["content"]
                         if shlex.split(command)[0] == "cn":
@@ -682,7 +731,6 @@ class Server():
                     f"'{self.clients[client]['name']}' left chat.")
                 break
             except BrokenPipeError:
-                raise
                 self.client_error(
                     client,
                     "Connection lost with "
@@ -716,6 +764,9 @@ class Server():
 
 
 def parse_args():
+    """
+    Parses command line arguments
+    """
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Simple chat server intended for personal use",
