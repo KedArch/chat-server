@@ -31,15 +31,18 @@ class Server():
                        "yourself a nickname or log in so others "\
                        "can recognize you!"
         self.help = {
-            "{csep}a": "list all clients",
+            "{csep}a": "list all clients ('!' indicates you instead of '|')",
             "{csep}cn": "change nickname (saved if logged in)",
             "{csep}l $user $pass": "log in",
             "{csep}ca $user $pass": "create account",
             "{csep}cap $pass $newpass": "change password (when logged in)",
             "{csep}ra $pass $user": "remove account (when logged in)",
             "{csep}pm $nick $message": "send private message to someone "
-            "online (also to guests)"
+            "online (also to guests)",
+            "{csep}sn $sname": "change server name in chat",
+            "{csep}ss $message": "say as server"
         }
+        self.groups = ("guest", "user", "admin")
         self.logtype = ("END", "LOG", "CHAT", "ERR")
         self.logsep = 0
         for i in self.logtype:
@@ -94,6 +97,7 @@ class Server():
                     check_same_thread=False)
                 cur = con.cursor()
                 try:
+                    self.offline = set()
                     for i in cur.execute("SELECT nick FROM users"):
                         self.reserved.add(i[0])
                 except sqlite3.OperationalError:
@@ -267,7 +271,7 @@ class Server():
             data = data.ljust(self.buffer)
             client.sendall(bytes(data, "utf8"))
 
-    def broadcast(self, data, prefix=None, omit=False):
+    def broadcast(self, data, prefix=None):
         """
         Broadcasts message to all clients
         """
@@ -277,7 +281,7 @@ class Server():
         errcl = []
         for sock in self.clients:
             try:
-                if not omit:
+                if self.clients[sock]['name']:
                     self.send(prefix + data, sock)
             except BrokenPipeError:
                 errcl.append(sock)
@@ -310,13 +314,13 @@ class Server():
                 if rdy:
                     response = json.loads(
                         client.recv(self.buffer).decode("utf8"))
-                    if not (response["type"] == "control" and
-                            "buffer" in response["attrib"] and
-                            response["content"] == f"ACK{self.buffer}"):
+                    if not (response['type'] == "control" and
+                            "buffer" in response['attrib'] and
+                            response['content'] == f"ACK{self.buffer}"):
                         raise json.JSONDecodeError
                     self.send(
                         str(self.timeout), client,
-                        "control", ["timeout"])
+                        "control", ['timeout'])
                 else:
                     raise ConnectionRefusedError
             except Exception:
@@ -327,8 +331,9 @@ class Server():
             self.send(self.welcome, client)
             self.clients[client] = {
                 "address": address,
+                "group": self.groups[0],
                 "user": None,
-                "name": None,
+                "name": None
             }
             handle_thread = threading.Thread(
                 name="Client: " + address[0] + str(address[1]),
@@ -342,11 +347,11 @@ class Server():
         """
         self.logging(text, self.logtype[1])
         if client in self.clients:
-            if self.clients[client]["name"]:
-                self.broadcast(btext, omit=True)
-            if not self.clients[client]["user"]:
+            if self.clients[client]['name']:
+                self.broadcast(btext)
+            if not self.clients[client]['user']:
                 try:
-                    self.reserved.remove(self.clients[client]["name"])
+                    self.reserved.remove(self.clients[client]['name'])
                 except KeyError:
                     pass
             del self.clients[client]
@@ -356,10 +361,11 @@ class Server():
         """
         Command functionality
         """
-        try:
-            name = shlex.split(command)[1]
-        except IndexError:
+        if not command:
+            self.send("Not enough arguments", client)
             return
+        else:
+            name = command
         if name in self.reserved:
             self.send(
                 "This nickname is already"
@@ -374,8 +380,8 @@ class Server():
         elif name == self.sname:
             self.send("You won't disguise as me!", client)
             return
-        self.clients[client]["name"], name = name,\
-            self.clients[client]["name"]
+        self.clients[client]['name'], name = name,\
+            self.clients[client]['name']
         if not name:
             self.logging(
                 f"{self.clients[client]['address'][0]}"
@@ -407,92 +413,92 @@ class Server():
                     client)
         if name in self.reserved:
             self.reserved.remove(name)
-        self.reserved.add(self.clients[client]["name"])
+        self.reserved.add(self.clients[client]['name'])
         self.broadcast(msg)
 
-    def command_help(self, client, command):
+    def command_help(self, client):
         """
         Command functionality
         """
         self.send("Server commands:\n", client)
         for i in self.help.keys():
             self.send(f"{i} - {self.help[i]}\n", client,
-                      "message", ["csep"])
+                      "message", ['csep'])
         self.send(
             "Arguments with '$' may be handled by client "
             "differently:\n", client)
 
-    def command_list_all(self, client, command):
+    def command_list_all(self, client):
         """
         Command functionality
         """
         if self.clients:
-            self.send("Client list:\n", client)
-            self.send(f"Server    |{self.sname}\n", client)
+            glen = len(self.groups[0])
+            for i in self.groups:
+                if glen < len(i):
+                    glen = i
+            if glen <= 5:
+                glen = 6
             names = list(self.reserved)
             names.sort()
-            for nick in names:
-                if nick == self.clients[client]['name']:
-                    if not self.clients[client]['user']:
-                        self.send(
-                            f"You(Guest)|{nick}\n",
-                            client)
-                    else:
-                        self.send(
-                            f"You       |{nick}\n",
-                            client)
+            self.send("Client list:", client)
+            self.send("Server".ljust(glen) + f" | {self.sname}", client)
+            self.send("---Online---", client)
+            were = []
+            for nextclient in self.clients.keys():
+                user = self.clients[nextclient]['group'].ljust(glen)
+                if self.clients[nextclient]['name'] == \
+                        self.clients[client]['name']:
+                    user += " ! "
                 else:
-                    for i in self.clients.values():
-                        if i['name'] == nick:
-                            for j in self.db[1].execute(
-                                    "SELECT nick FROM users"):
-                                if nick == j[0]:
-                                    self.send(f"Online    |{nick}\n", client)
-                                    break
-                            else:
-                                self.send(f"Guest     |{nick}\n", client)
-                            break
-                    else:
-                        self.send(
-                            f"Offline   |{nick}\n",
-                            client)
+                    user += " | "
+                user += self.clients[nextclient]['name']
+                self.send(user, client)
+                were.append(self.clients[client]['name'])
+            self.send("---Offline---", client)
+            for i in self.db[1].execute("SELECT nick, sgroup FROM users"):
+                if i[0] in were:
+                    continue
+                user = i[1].ljust(glen) + " | " + i[0]
+                self.send(user, client)
         else:
-            self.send("Nobody is on server.", client)
+            self.send("Nobody is on server now.", client)
 
     def command_login(self, client, command):
         """
         Command functionality
         """
         try:
-            user = shlex.split(command)[1]
+            user = shlex.split(command)[0]
             password = hashlib.sha512(
-                bytes(shlex.split(command)[2],
+                bytes(shlex.split(command)[1],
                       "utf8")).hexdigest()
         except IndexError:
             self.send("Not enough arguments", client)
             return
-        for i in self.db[1].execute("SELECT user, password, nick FROM users"):
+        for i in self.db[1].execute("SELECT * FROM users"):
             if user == i[0] and password == i[1]:
                 self.send(
                     "Succesfully logged in as user "
-                    f"'{user}' aka '{i[2]}'",
+                    f"'{user}' aka '{i[3]}'",
                     client)
                 self.logging(
                     f"{self.clients[client]['address'][0]}:"
                     f"{self.clients[client]['address'][1]} "
                     f"logged in as '{user}'"
-                    f" aka '{i[2]}",
+                    f" aka '{i[3]}'",
                     self.logtype[1])
                 if not self.clients[client]['user'] and\
                         self.clients[client]['name']:
                     self.broadcast(
                         f"'{self.clients[client]['name']}' "
-                        f"logged in as '{i[2]}'.")
+                        f"logged in as '{i[3]}'.")
                     self.reserved.remove(self.clients[client]['name'])
                 else:
-                    self.broadcast(f"'{i[2]}' logged in.")
+                    self.broadcast(f"'{i[3]}' logged in.")
                 self.clients[client]['user'] = user
-                self.clients[client]['name'] = i[2]
+                self.clients[client]['name'] = i[3]
+                self.clients[client]['group'] = i[2]
                 break
         else:
             self.send("Invalid username or password", client)
@@ -502,9 +508,9 @@ class Server():
         Command functionality
         """
         try:
-            user = shlex.split(command)[1]
+            user = shlex.split(command)[0]
             password = hashlib.sha512(
-                bytes(shlex.split(command)[2], "utf8")).hexdigest()
+                bytes(shlex.split(command)[1], "utf8")).hexdigest()
         except IndexError:
             self.send("Not enough arguments", client)
             return
@@ -543,6 +549,7 @@ class Server():
                 self.broadcast(f"'{user}' logged in.")
             self.clients[client]['user'] = user
             self.clients[client]['name'] = user
+            self.clients[client]['group'] = self.groups[1]
             self.reserved.add(user)
 
     def command_change_password(self, client, command):
@@ -555,9 +562,9 @@ class Server():
         else:
             try:
                 oldpass = hashlib.sha512(
-                    bytes(shlex.split(command)[1], "utf8")).hexdigest()
+                    bytes(shlex.split(command)[0], "utf8")).hexdigest()
                 newpass = hashlib.sha512(
-                    bytes(shlex.split(command)[2], "utf8")).hexdigest()
+                    bytes(shlex.split(command)[1], "utf8")).hexdigest()
             except IndexError:
                 self.send("Not enough arguments", client)
                 return
@@ -596,8 +603,8 @@ class Server():
         else:
             try:
                 password = hashlib.sha512(
-                    bytes(shlex.split(command)[1], "utf8")).hexdigest()
-                username = shlex.split(command)[2]
+                    bytes(shlex.split(command)[0], "utf8")).hexdigest()
+                username = shlex.split(command)[1]
             except IndexError:
                 self.send("Not enough arguments", client)
                 return
@@ -633,7 +640,10 @@ class Server():
         """
         Command functionality
         """
-        nick = command.split()[1]
+        nick, message = command.split(" ", 1)
+        if not message or not nick:
+            self.send("Not enough arguments", client)
+            return
         if nick == self.clients[client]['name']:
             self.send(
                 "It would be funny to send messages to lonely self but no",
@@ -646,9 +656,26 @@ class Server():
         else:
             self.send(f"{nick} is unavailable!", client)
             return
-        message = command[len(command.split()[0])+len(command.split()[1])+2:]
         self.send(f"(priv)|{self.clients[client]['name']}: {message}", priv)
         self.send(f"(priv)|{self.clients[client]['name']}: {message}", client)
+
+    def command_server_name(self, client, command):
+        if self.clients[client]['group'] == "admin":
+            self.broadcast(
+                f"Server now calls itself '{command}'")
+            self.sname = command
+        else:
+            self.send(
+                "You do not have required group for this action: 'admin'",
+                client)
+
+    def command_server_message(self, client, command):
+        if self.clients[client]['group'] == "admin":
+            self.broadcast(command)
+        else:
+            self.send(
+                "You do not have required group for this action: 'admin'",
+                client)
 
     def handle_connected(self, client):
         """
@@ -664,65 +691,69 @@ class Server():
                     if not data:
                         raise ConnectionResetError
                     data = json.loads(data)
-                    if data["type"] == "message":
-                        if not self.clients[client]["name"]:
+                    if data['type'] == "message":
+                        if not self.clients[client]['name']:
                             err += 1
                             if err == 1:
                                 self.send(
                                     "Type {csep}h for help.",
-                                    client, attrib=["csep"])
+                                    client, attrib=['csep'])
                             elif err == 2:
                                 self.send(
                                     "Last chance. Type {csep}h.",
-                                    client, attrib=["csep"])
+                                    client, attrib=['csep'])
                             elif err == 3:
                                 raise ConnectionRefusedError
                             continue
                         self.broadcast(
-                            data["content"],
-                            self.clients[client]["name"] + ": ")
-                    if data["type"] == "command":
-                        command = data["content"]
-                        if shlex.split(command)[0] == "cn":
-                            self.command_change_nickname(client, command)
-                        elif command == "h":
-                            self.command_help(client, command)
-                        elif command == "a":
-                            self.command_list_all(client, command)
-                        elif shlex.split(command)[0] == "l":
-                            self.command_login(client, command)
-                        elif shlex.split(command)[0] == "ca":
-                            self.command_create_account(client, command)
-                        elif not self.clients[client]["name"]:
+                            data['content'],
+                            self.clients[client]['name'] + ": ")
+                    if data['type'] == "command":
+                        command = data['content'].split(" ", 1)
+                        if command[0] == "cn":
+                            self.command_change_nickname(client, command[1])
+                        elif command[0] == "h":
+                            self.command_help(client)
+                        elif command[0] == "l":
+                            self.command_login(client, command[1])
+                        elif command[0] == "ca":
+                            self.command_create_account(client, command[1])
+                        elif not self.clients[client]['name']:
                             err += 1
                             if err == 1:
                                 self.send(
                                     "Type {csep}h for help.",
-                                    client, attrib=["csep"])
+                                    client, attrib=['csep'])
                             elif err == 2:
                                 self.send(
                                     "Last chance. Type {csep}h.",
-                                    client, attrib=["csep"])
+                                    client, attrib=['csep'])
                             elif err == 3:
                                 raise ConnectionRefusedError
                             continue
-                        elif shlex.split(command)[0] == "cap":
-                            self.command_change_password(client, command)
-                        elif shlex.split(command)[0] == "ra":
-                            self.command_remove_account(client, command)
-                        elif shlex.split(command)[0] == "pm":
-                            self.command_private_message(client, command)
+                        elif command[0] == "a":
+                            self.command_list_all(client)
+                        elif command[0] == "cap":
+                            self.command_change_password(client, command[1])
+                        elif command[0] == "ra":
+                            self.command_remove_account(client, command[1])
+                        elif command[0] == "pm":
+                            self.command_private_message(client, command[1])
+                        elif command[0] == "sn":
+                            self.command_server_name(client, command[1])
+                        elif command[0] == "ss":
+                            self.command_server_message(client, command[1])
                         else:
                             self.send(f"Unknown command: ':{command}'", client)
-                    if data["type"] == "control":
-                        if "alive" in data["attrib"]:
+                    if data['type'] == "control":
+                        if "alive" in data['attrib']:
                             pass
                     timeout = False
                 else:
                     if timeout:
                         raise ConnectionError
                     else:
-                        self.send("", client, "control", ["alive"])
+                        self.send("", client, "control", ['alive'])
                         timeout = True
             except (ConnectionAbortedError, ConnectionResetError):
                 self.client_error(
