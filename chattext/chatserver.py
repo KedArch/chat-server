@@ -32,7 +32,7 @@ class Server():
                        "can recognize you!"
         self.help = {
             "{csep}a": "list all clients ('!' indicates you instead of '|')",
-            "{csep}cn": "change nickname (saved if logged in)",
+            "{csep}cn $nick": "change nickname (saved if logged in)",
             "{csep}l $user $pass": "log in",
             "{csep}ca $user $pass": "create account",
             "{csep}cap $pass $newpass": "change password (when logged in)",
