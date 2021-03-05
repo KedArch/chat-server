@@ -308,7 +308,8 @@ class Server():
             try:
                 rdy, _, _ = select.select([client], [], [], self.timeout/2)
                 if rdy:
-                    response = json.loads(client.recv(self.buffer))
+                    response = json.loads(
+                        client.recv(self.buffer).decode("utf8"))
                     if not (response["type"] == "control" and
                             "buffer" in response["attrib"] and
                             response["content"] == f"ACK{self.buffer}"):
