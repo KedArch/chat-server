@@ -328,7 +328,8 @@ class Server():
                     client, "Failed to communicate with "
                     f"{address[0]}:{address[1]}, disconnecting.")
                 continue
-            self.send(self.welcome, client)
+            self.command_help(client, True)
+            self.send(self.welcome, client, "message", ["welcome"])
             self.clients[client] = {
                 "address": address,
                 "group": self.groups[0],
@@ -416,17 +417,20 @@ class Server():
         self.reserved.add(self.clients[client]['name'])
         self.broadcast(msg)
 
-    def command_help(self, client):
+    def command_help(self, client, completion=False):
         """
         Command functionality
         """
-        self.send("Server commands:\n", client)
-        for i in self.help.keys():
-            self.send(f"{i} - {self.help[i]}\n", client,
-                      "message", ['csep'])
-        self.send(
-            "Arguments with '$' may be handled by client "
-            "differently:\n", client)
+        if completion:
+            for i in self.help.keys():
+                self.send(i, client, "control", ['csep'])
+        else:
+            self.send("Server commands:", client)
+            for i in self.help.keys():
+                self.send(f"{i} - {self.help[i]}", client, "message", ['csep'])
+            self.send(
+                "Arguments with '$' may be handled by client "
+                "differently:\n", client)
 
     def command_list_all(self, client):
         """
