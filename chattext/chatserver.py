@@ -351,7 +351,7 @@ class Server():
             name = self.clients[client]['name']
             if not self.clients[client]['user']:
                 try:
-                    self.reserved.remove(self.clients[client]['name'])
+                    self.reserved.remove(name)
                 except KeyError:
                     pass
             del self.clients[client]
