@@ -798,6 +798,8 @@ class Server():
                     "limit and was disconnected.",
                     f"'{self.clients[client]['name']}' timed out.")
                 break
+            except IndexError:
+                self.send("Invalid command arguments", client)
 
 
 def parse_args():
