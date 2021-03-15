@@ -290,7 +290,7 @@ class Server():
                 sock,
                 f"Connection lost with {self.clients[sock]['address'][0]}"
                 f": {self.clients[sock]['address'][1]}.",
-                f"Connection lost with {self.clients[sock]['name']}.")
+                f"Connection lost with '{self.clients[sock]['name']}'.")
 
     def accept_connections(self):
         """
@@ -348,14 +348,15 @@ class Server():
         """
         self.logging(text, self.logtype[1])
         if client in self.clients:
-            if self.clients[client]['name']:
-                self.broadcast(btext)
+            name = self.clients[client]['name']
             if not self.clients[client]['user']:
                 try:
                     self.reserved.remove(self.clients[client]['name'])
                 except KeyError:
                     pass
             del self.clients[client]
+            if name:
+                self.broadcast(btext)
         client.close()
 
     def command_change_nickname(self, client, command):
@@ -458,7 +459,7 @@ class Server():
                     user += " | "
                 user += self.clients[nextclient]['name']
                 self.send(user, client)
-                were.append(self.clients[client]['name'])
+                were.append(self.clients[nextclient]['name'])
             self.send("---Offline---", client)
             for i in self.db[1].execute("SELECT nick, sgroup FROM users"):
                 if i[0] in were:
