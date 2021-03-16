@@ -48,7 +48,7 @@ class Server():
         for i in self.logtype:
             if len(i) > self.logsep:
                 self.logsep = len(i)
-        self.context = None
+        self.ssl_context = None
         signal.signal(signal.SIGTERM, self.exit)
         signal.signal(signal.SIGINT, self.exit)
 
@@ -184,11 +184,10 @@ class Server():
             print("'passwd' requires 'key'")
             sys.exit(67)
         if key:
-            self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            self.ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             try:
-                self.context.load_cert_chain(certfile=cert,
-                                             keyfile=key,
-                                             password=passwd)
+                self.ssl_context.load_cert_chain(
+                        certfile=cert, keyfile=key, password=passwd)
             except ssl.SSLError:
                 print("Invalid cert/key/password")
                 sys.exit(67)
@@ -256,7 +255,7 @@ class Server():
         except EOFError:
             self.exit(0)
 
-    def send(self, content, client, mtype="message",
+    def send(self, content, client,  mtype="message",
              attrib=[]):
         """
         Handles message sending with correct protocol
@@ -271,18 +270,18 @@ class Server():
             data = data.ljust(self.buffer)
             client.sendall(bytes(data, "utf8"))
 
-    def broadcast(self, data, prefix=None):
+    def broadcast(self, content, prefix=None):
         """
         Broadcasts message to all clients
         """
         if not prefix:
             prefix = self.sname + ": "
-        self.logging(prefix + data, self.logtype[2])
+        self.logging(prefix + content, self.logtype[2])
         errcl = []
         for sock in self.clients:
             try:
                 if self.clients[sock]['name']:
-                    self.send(prefix + data, sock)
+                    self.send(prefix + content, sock)
             except BrokenPipeError:
                 errcl.append(sock)
         for sock in errcl:
@@ -298,9 +297,10 @@ class Server():
         """
         while True:
             client, address = self.server.accept()
-            if self.context:
+            if self.ssl_context:
                 try:
-                    client = self.context.wrap_socket(client, server_side=True)
+                    client = self.ssl_context.wrap_socket(
+                            client, server_side=True)
                 except (ssl.SSLError, OSError):
                     self.logging(
                         f"{address[0]}:{address[1]} SSL handshake "
@@ -321,6 +321,9 @@ class Server():
                     self.send(
                         str(self.timeout), client,
                         "control", ['timeout'])
+                    #self.send(self.sname, client, "control", ["sname"]) #  to implement
+                    self.command_help(client, True)
+                    self.send(self.welcome, client, "message", ["welcome"])
                 else:
                     raise ConnectionRefusedError
             except Exception:
@@ -328,8 +331,6 @@ class Server():
                     client, "Failed to communicate with "
                     f"{address[0]}:{address[1]}, disconnecting.")
                 continue
-            self.command_help(client, True)
-            self.send(self.welcome, client, "message", ["welcome"])
             self.clients[client] = {
                 "address": address,
                 "group": self.groups[0],
@@ -661,8 +662,9 @@ class Server():
         else:
             self.send(f"{nick} is unavailable!", client)
             return
-        self.send(f"(priv)|{self.clients[client]['name']}: {message}", priv)
-        self.send(f"(priv)|{self.clients[client]['name']}: {message}", client)
+        msg = f"(priv to '{nick}')|{self.clients[client]['name']}: {message}"
+        self.send(msg, priv)
+        self.send(msg, client)
 
     def command_server_name(self, client, command):
         if self.clients[client]['group'] == "admin":
