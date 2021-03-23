@@ -264,17 +264,17 @@ class Server():
             await self.loop.sock_sendall(client, bytes(data, "utf8"))
 
     async def broadcast(self, content, mtype="message",
-                        attrib="", prefix=None):
+                        attrib="", prefix="", to_all=False):
         """
         Broadcasts message to all clients
         """
-        if not prefix:
+        if not prefix and mtype == "message":
             prefix = self.sname + ": "
         self.logging(prefix + content, self.logtype[2])
         errcl = []
         for sock in self.clients:
             try:
-                if self.clients[sock]['name']:
+                if self.clients[sock]['name'] or to_all:
                     await self.send(sock, prefix + content, mtype, attrib)
             except BrokenPipeError:
                 errcl.append(sock)
@@ -698,7 +698,8 @@ class Server():
                     " and nick")
                 return
             self.sname = command
-            await self.broadcast(self.sname, mtype="control", attrib="sname")
+            await self.broadcast(
+                self.sname, mtype="control", attrib="sname", to_all=True)
             await self.broadcast(
                 f"Server now calls itself '{command}'")
         else:
