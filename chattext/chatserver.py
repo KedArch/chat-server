@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 import os
 import sys
-import ssl
 import json
 import shlex
-import select
 import signal
-import socket
 import sqlite3
 import hashlib
 import argparse
 import datetime
-import threading
+import asyncio
+from asyncio.selector_events import ssl
+from asyncio.selector_events import socket
 
 
 class Server():
@@ -20,12 +19,13 @@ class Server():
     """
     def __init__(self):
         self.basedir = os.path.dirname(os.path.realpath(sys.argv[0]))
-        self.buffer = 1024  # Better if >= 512 and <= 2048
+        self.buffer = 512  # Better if >= 512 and <= 2048
         self.host = "0.0.0.0"
         self.port = 1111
         self.timeout = 60.0  # Better if >= 30.0
         self.logfile = None
         self.sname = "Server"
+        self.maxchars = 30
         self.reserved = set()
         self.welcome = "Welcome on this server!\nGive "\
                        "yourself a nickname or log in so others "\
@@ -160,8 +160,8 @@ class Server():
                         self.logtype[3])
                     self.db[0].close()
 
-    def start(self, foreground=False, log=None, overwrite=False, append=False,
-              key=None, cert=None, passwd=None):
+    def start(self, foreground=False, log=None, overwrite=False,
+              append=False, key=None, cert=None, passwd=None):
         """
         Checks conditions and initializes server
         """
@@ -243,20 +243,13 @@ class Server():
             str(datetime.datetime.now())),
             self.logtype[0])
         self.db_check()
+        self.server.setblocking(False)
         self.server.listen()
         self.logging("Waiting for connections...", self.logtype[1])
-        accepting_thread = threading.Thread(
-            name="Accepting connections",
-            target=self.accept_connections)
-        accepting_thread.daemon = 1
-        accepting_thread.start()
-        try:
-            accepting_thread.join()
-        except EOFError:
-            self.exit(0)
+        self.loop = asyncio.get_event_loop()
+        self.loop.run_until_complete(self.accept_connections())
 
-    def send(self, content, client,  mtype="message",
-             attrib=[]):
+    async def send(self, client, content, mtype="message", attrib=""):
         """
         Handles message sending with correct protocol
         """
@@ -268,9 +261,10 @@ class Server():
         data = json.dumps(tmp)
         if not len(data) > int(self.buffer*0.8):
             data = data.ljust(self.buffer)
-            client.sendall(bytes(data, "utf8"))
+            await self.loop.sock_sendall(client, bytes(data, "utf8"))
 
-    def broadcast(self, content, prefix=None):
+    async def broadcast(self, content, mtype="message",
+                        attrib="", prefix=None):
         """
         Broadcasts message to all clients
         """
@@ -281,25 +275,27 @@ class Server():
         for sock in self.clients:
             try:
                 if self.clients[sock]['name']:
-                    self.send(prefix + content, sock)
+                    await self.send(sock, prefix + content, mtype, attrib)
             except BrokenPipeError:
                 errcl.append(sock)
+            await asyncio.sleep(0)
         for sock in errcl:
-            self.client_error(
+            await self.client_error(
                 sock,
                 f"Connection lost with {self.clients[sock]['address'][0]}"
                 f": {self.clients[sock]['address'][1]}.",
                 f"Connection lost with '{self.clients[sock]['name']}'.")
+            await asyncio.sleep(0)
 
-    def accept_connections(self):
+    async def accept_connections(self):
         """
         Handles first time connection
         """
         while True:
-            client, address = self.server.accept()
+            client, address = await self.loop.sock_accept(self.server)
             if self.ssl_context:
                 try:
-                    client = self.ssl_context.wrap_socket(
+                    client = await self.ssl_context.wrap_socket(
                             client, server_side=True)
                 except (ssl.SSLError, OSError):
                     self.logging(
@@ -308,26 +304,25 @@ class Server():
                     continue
             self.logging(f"{address[0]}:{address[1]} connected.",
                          self.logtype[1])
+            client.setblocking(False)
             client.sendall(bytes(str(self.buffer), "utf8"))
             try:
-                rdy, _, _ = select.select([client], [], [], self.timeout/2)
-                if rdy:
-                    response = json.loads(
-                        client.recv(self.buffer).decode("utf8"))
-                    if not (response['type'] == "control" and
-                            "buffer" in response['attrib'] and
-                            response['content'] == f"ACK{self.buffer}"):
-                        raise json.JSONDecodeError
-                    self.send(
-                        str(self.timeout), client,
-                        "control", ['timeout'])
-                    #self.send(self.sname, client, "control", ["sname"]) #  to implement
-                    self.command_help(client, True)
-                    self.send(self.welcome, client, "message", ["welcome"])
-                else:
-                    raise ConnectionRefusedError
+                response = await asyncio.wait_for(
+                    self.loop.sock_recv(client, self.buffer),
+                    self.timeout/2)
+                response = json.loads(response.decode("utf8"))
+                if not (response['type'] == "control" and
+                        response['attrib'] == "buffer" and
+                        response['content'] == f"ACK{self.buffer}"):
+                    raise json.JSONDecodeError
+                await self.send(
+                    client,
+                    str(self.timeout), "control", 'timeout')
+                await self.send(client, self.sname, "control", "sname")
+                await self.command_help(client, True)
+                await self.send(client, self.welcome, "message", "welcome")
             except Exception:
-                self.client_error(
+                await self.client_error(
                     client, "Failed to communicate with "
                     f"{address[0]}:{address[1]}, disconnecting.")
                 continue
@@ -337,13 +332,9 @@ class Server():
                 "user": None,
                 "name": None
             }
-            handle_thread = threading.Thread(
-                name="Client: " + address[0] + str(address[1]),
-                target=self.handle_connected, args=(client, ))
-            handle_thread.daemon = 1
-            handle_thread.start()
+            self.loop.create_task(self.handle_connected(client))
 
-    def client_error(self, client, text, btext=""):
+    async def client_error(self, client, text, btext=""):
         """
         Clears variables after client error
         """
@@ -357,31 +348,37 @@ class Server():
                     pass
             del self.clients[client]
             if name:
-                self.broadcast(btext)
+                await self.broadcast(btext)
         client.close()
 
-    def command_change_nickname(self, client, command):
+    async def command_change_nickname(self, client, command):
         """
         Command functionality
         """
         if not command:
-            self.send("Not enough arguments", client)
+            await self.send(client, "Not enough arguments")
             return
         else:
             name = command
         if name in self.reserved:
-            self.send(
+            await self.send(
+                client,
                 "This nickname is already"
-                f" taken: '{name}'",
-                client)
+                f" taken: '{name}'")
             return
         elif not name:
-            self.send(
-                "Invalid nickname",
-                client)
+            await self.send(
+                client,
+                "Invalid nickname")
             return
         elif name == self.sname:
-            self.send("You won't disguise as me!", client)
+            await self.send(client, "You won't disguise as server!")
+            return
+        if len(name) > self.maxchars:
+            await self.send(
+                client,
+                f"Sorry, max {self.maxchars} characters for username"
+                " and nick")
             return
         self.clients[client]['name'], name = name,\
             self.clients[client]['name']
@@ -410,31 +407,38 @@ class Server():
                     f"'{self.clients[client]['name']}' WHERE user = "
                     f"'{self.clients[client]['user']}'")
             except sqlite3.OperationalError:
-                self.send(
+                await self.send(
+                    client,
                     "Couldn't manipulate user database!"
-                    " (Internal server error)",
-                    client)
+                    " (Internal server error)")
         if name in self.reserved:
             self.reserved.remove(name)
+        await self.send(
+            client,
+            f"{self.clients[client]['name']}|{self.clients[client]['user']}"
+            f"|{self.clients[client]['group']}", "control", "client")
         self.reserved.add(self.clients[client]['name'])
-        self.broadcast(msg)
+        await self.broadcast(msg)
 
-    def command_help(self, client, completion=False):
+    async def command_help(self, client, completion=False):
         """
         Command functionality
         """
         if completion:
             for i in self.help.keys():
-                self.send(i, client, "control", ['csep'])
+                await self.send(client, i, "control", 'csep')
         else:
-            self.send("Server commands:", client)
+            await self.send(client, "Server commands:")
             for i in self.help.keys():
-                self.send(f"{i} - {self.help[i]}", client, "message", ['csep'])
-            self.send(
+                await self.send(
+                    client,
+                    f"{i} - {self.help[i]}", "message", 'csep')
+            await self.send(
+                client,
                 "Arguments with '$' may be handled by client "
-                "differently:\n", client)
+                "differently:\n")
 
-    def command_list_all(self, client):
+    async def command_list_all(self, client):
         """
         Command functionality
         """
@@ -447,9 +451,9 @@ class Server():
                 glen = 6
             names = list(self.reserved)
             names.sort()
-            self.send("Client list:", client)
-            self.send("Server".ljust(glen) + f" | {self.sname}", client)
-            self.send("---Online---", client)
+            await self.send(client, "Client list:")
+            await self.send(client, "Server".ljust(glen) + f" | {self.sname}")
+            await self.send(client, "---Online---")
             were = []
             for nextclient in self.clients.keys():
                 user = self.clients[nextclient]['group'].ljust(glen)
@@ -459,35 +463,36 @@ class Server():
                 else:
                     user += " | "
                 user += self.clients[nextclient]['name']
-                self.send(user, client)
+                await self.send(client, user)
                 were.append(self.clients[nextclient]['name'])
-            self.send("---Offline---", client)
+            await self.send(client, "---Offline---")
             for i in self.db[1].execute("SELECT nick, sgroup FROM users"):
                 if i[0] in were:
                     continue
                 user = i[1].ljust(glen) + " | " + i[0]
-                self.send(user, client)
+                await self.send(client, user)
         else:
-            self.send("Nobody is on server now.", client)
+            await self.send(client, "Nobody is on server now.")
 
-    def command_login(self, client, command):
+    async def command_login(self, client, command):
         """
         Command functionality
         """
-        try:
-            user = shlex.split(command)[0]
-            password = hashlib.sha512(
-                bytes(shlex.split(command)[1],
-                      "utf8")).hexdigest()
-        except IndexError:
-            self.send("Not enough arguments", client)
+        user = shlex.split(command)[0]
+        if " " in user:
+            await self.send(
+                client,
+                "Sorry, no spaces in usernames")
             return
+        password = hashlib.sha512(
+            bytes(shlex.split(command)[1],
+                  "utf8")).hexdigest()
         for i in self.db[1].execute("SELECT * FROM users"):
             if user == i[0] and password == i[1]:
-                self.send(
+                await self.send(
+                    client,
                     "Succesfully logged in as user "
-                    f"'{user}' aka '{i[3]}'",
-                    client)
+                    f"'{user}' aka '{i[3]}'")
                 self.logging(
                     f"{self.clients[client]['address'][0]}:"
                     f"{self.clients[client]['address'][1]} "
@@ -496,35 +501,48 @@ class Server():
                     self.logtype[1])
                 if not self.clients[client]['user'] and\
                         self.clients[client]['name']:
-                    self.broadcast(
+                    await self.broadcast(
                         f"'{self.clients[client]['name']}' "
                         f"logged in as '{i[3]}'.")
                     self.reserved.remove(self.clients[client]['name'])
                 else:
-                    self.broadcast(f"'{i[3]}' logged in.")
+                    await self.broadcast(f"'{i[3]}' logged in.")
                 self.clients[client]['user'] = user
                 self.clients[client]['name'] = i[3]
                 self.clients[client]['group'] = i[2]
+                await self.send(
+                    client,
+                    f"{i[3]}|{user}|{i[2]}", "control", "client")
                 break
         else:
-            self.send("Invalid username or password", client)
+            await self.send(client, "Invalid username or password")
 
-    def command_create_account(self, client, command):
+    async def command_create_account(self, client, command):
         """
         Command functionality
         """
-        try:
-            user = shlex.split(command)[0]
-            password = hashlib.sha512(
-                bytes(shlex.split(command)[1], "utf8")).hexdigest()
-        except IndexError:
-            self.send("Not enough arguments", client)
+        user = shlex.split(command)[0]
+        if len(user) > self.maxchars:
+            await self.send(
+                client,
+                f"Sorry, max {self.maxchars} characters for username"
+                " and nick")
             return
+        elif " " in user:
+            await self.send(
+                client,
+                "Sorry, no spaces in usernames")
+            return
+        elif user in ("None"):
+            await self.send(client, "Haha, very funny")
+            return
+        password = hashlib.sha512(
+            bytes(shlex.split(command)[1], "utf8")).hexdigest()
         for i in self.db[1].execute("SELECT user FROM users"):
             if user == i[0]:
-                self.send(
-                    f"User already exist: '{user}'",
-                    client)
+                await self.send(
+                    client,
+                    f"User already exist: '{user}'")
                 break
         else:
             try:
@@ -532,48 +550,47 @@ class Server():
                     f"INSERT INTO users VALUES ('{user}',"
                     f"'{password}','user','{user}')")
             except sqlite3.OperationalError:
-                self.send(
-                    f"Could not create user '{user}'.",
-                    client)
+                await self.send(
+                    client,
+                    f"Could not create user '{user}'.")
                 return
             self.db[0].commit()
-            self.send(
+            await self.send(
+                client,
                 f"User '{user}' succesfully created! "
-                "Logging in.",
-                client)
+                "Logging in.")
             self.logging(
                 f"{self.clients[client]['address'][0]}:"
                 f"{self.clients[client]['address'][1]} "
                 f"created user '{user}'", self.logtype[1])
             if not self.clients[client]['user'] and\
                     self.clients[client]['name']:
-                self.broadcast(
+                await self.broadcast(
                     f"'{self.clients[client]['name']}' "
                     f"logged in as '{user}'.")
                 self.reserved.remove(self.clients[client]['name'])
             else:
-                self.broadcast(f"'{user}' logged in.")
+                await self.broadcast(f"'{user}' logged in.")
             self.clients[client]['user'] = user
             self.clients[client]['name'] = user
             self.clients[client]['group'] = self.groups[1]
+            await self.send(
+                client,
+                f"{user}|{user}|{self.groups[1]}", "control", "client")
             self.reserved.add(user)
 
-    def command_change_password(self, client, command):
+    async def command_change_password(self, client, command):
         """
         Command functionality
         """
         if not self.clients[client]['user']:
-            self.send("You are not logged in!", client)
+            await self.send(client, "You are not logged in!")
             return
         else:
-            try:
-                oldpass = hashlib.sha512(
-                    bytes(shlex.split(command)[0], "utf8")).hexdigest()
-                newpass = hashlib.sha512(
-                    bytes(shlex.split(command)[1], "utf8")).hexdigest()
-            except IndexError:
-                self.send("Not enough arguments", client)
-                return
+            oldpass = hashlib.sha512(
+                bytes(shlex.split(command)[0], "utf8")).hexdigest()
+            newpass = hashlib.sha512(
+                bytes(shlex.split(command)[1], "utf8")).hexdigest()
             if oldpass == self.db[1].execute(
                     "SELECT password FROM users WHERE user = "
                     f"'{self.clients[client]['user']}'").fetchone()[0]:
@@ -583,13 +600,13 @@ class Server():
                         f"'{newpass}' WHERE user = "
                         f"'{self.clients[client]['user']}'")
                 except sqlite3.OperationalError:
-                    self.send(
+                    await self.send(
+                        client,
                         "Couldn't manipulate user database!"
-                        " (Internal server error)",
-                        client)
+                        " (Internal server error)")
                     return
                 self.db[0].commit()
-                self.send("Successfully changed password", client)
+                await self.send(client, "Successfully changed password")
                 self.logging(
                     f"{self.clients[client]['address'][0]}:"
                     f"{self.clients[client]['address'][1]} "
@@ -597,27 +614,28 @@ class Server():
                     "password.",
                     self.logtype[1])
             else:
-                self.send("Invalid password", client)
+                await self.send(client, "Invalid password")
 
-    def command_remove_account(self, client, command):
+    async def command_remove_account(self, client, command):
         """
         Command functionality
         """
         if not self.clients[client]['user']:
-            self.send("You are not logged in!", client)
+            await self.send(client, "You are not logged in!")
             return
         else:
-            try:
-                password = hashlib.sha512(
-                    bytes(shlex.split(command)[0], "utf8")).hexdigest()
-                username = shlex.split(command)[1]
-            except IndexError:
-                self.send("Not enough arguments", client)
+            password = hashlib.sha512(
+                bytes(shlex.split(command)[0], "utf8")).hexdigest()
+            user = shlex.split(command)[1]
+            if " " in user:
+                await self.send(
+                    client,
+                    "Sorry, no spaces in usernames")
                 return
             if password == self.db[1].execute(
                     "SELECT password FROM users WHERE user = "
                     f"'{self.clients[client]['user']}'").fetchone()[0] and\
-                    username == self.db[1].execute(
+                    user == self.db[1].execute(
                     "SELECT user FROM users WHERE user = "
                     f"'{self.clients[client]['user']}'").fetchone()[0]:
                 try:
@@ -625,13 +643,13 @@ class Server():
                         "DELETE FROM users "
                         f"WHERE user = '{self.clients[client]['user']}'")
                 except sqlite3.OperationalError:
-                    self.send(
+                    await self.send(
+                        client,
                         "Couldn't manipulate user database!"
-                        " (Internal server error)",
-                        client)
+                        " (Internal server error)")
                     return
                 self.db[0].commit()
-                self.send("Successfully removed account", client)
+                await self.send(client, "Successfully removed account")
                 self.logging(
                     f"{self.clients[client]['address'][0]}:"
                     f"{self.clients[client]['address'][1]} "
@@ -639,138 +657,166 @@ class Server():
                     "account.",
                     self.logtype[1])
                 self.clients[client]['user'] = None
+                await self.send(
+                    client,
+                    f"{self.clients[client]['name']}|None|guest",
+                    "control", "client")
             else:
-                self.send("Invalid password or username", client)
+                await self.send(client, "Invalid password or username")
 
-    def command_private_message(self, client, command):
+    async def command_private_message(self, client, command):
         """
         Command functionality
         """
         nick, message = command.split(" ", 1)
         if not message or not nick:
-            self.send("Not enough arguments", client)
+            await self.send(client, "Not enough arguments")
             return
         if nick == self.clients[client]['name']:
-            self.send(
-                "It would be funny to send messages to lonely self but no",
-                client)
+            await self.send(
+                client,
+                "It would be funny to send messages to lonely self but no")
             return
         for i in self.clients.items():
             if i[1]['name'] == nick:
                 priv = i[0]
                 break
         else:
-            self.send(f"{nick} is unavailable!", client)
+            await self.send(client, f"{nick} is unavailable!")
             return
-        msg = f"(priv to '{nick}')|{self.clients[client]['name']}: {message}"
-        self.send(msg, priv)
-        self.send(msg, client)
+        msg = f"(priv '{nick}' to '{self.clients[client]['name']}')"\
+              f"|{self.clients[client]['name']}: {message}"
+        await self.send(priv, msg)
+        await self.send(client, msg)
 
-    def command_server_name(self, client, command):
+    async def command_server_name(self, client, command):
         if self.clients[client]['group'] == "admin":
-            self.broadcast(
-                f"Server now calls itself '{command}'")
+            if len(command) > self.maxchars:
+                await self.send(
+                    client,
+                    f"Sorry, max {self.maxchars} characters for username"
+                    " and nick")
+                return
             self.sname = command
+            await self.broadcast(self.sname, mtype="control", attrib="sname")
+            await self.broadcast(
+                f"Server now calls itself '{command}'")
         else:
-            self.send(
-                "You do not have required group for this action: 'admin'",
-                client)
+            await self.send(
+                client,
+                "You do not have required group for this action: 'admin'")
 
-    def command_server_message(self, client, command):
+    async def command_server_message(self, client, command):
         if self.clients[client]['group'] == "admin":
-            self.broadcast(command)
+            await self.broadcast(command)
         else:
-            self.send(
-                "You do not have required group for this action: 'admin'",
-                client)
+            await self.send(
+                client,
+                "You do not have required group for this action: 'admin'")
 
-    def handle_connected(self, client):
+    async def handle_connected(self, client):
         """
         Serves client output
         """
         err = 0
-        timeout = False
+        timeout = 0
         while True:
             try:
-                rdy, _, _ = select.select([client], [], [], self.timeout/2)
-                if rdy:
-                    data = client.recv(self.buffer).decode("utf8")
-                    if not data:
-                        raise ConnectionResetError
-                    data = json.loads(data)
-                    if data['type'] == "message":
-                        if not self.clients[client]['name']:
-                            err += 1
-                            if err == 1:
-                                self.send(
-                                    "Type {csep}h for help.",
-                                    client, attrib=['csep'])
-                            elif err == 2:
-                                self.send(
-                                    "Last chance. Type {csep}h.",
-                                    client, attrib=['csep'])
-                            elif err == 3:
-                                raise ConnectionRefusedError
-                            continue
-                        self.broadcast(
-                            data['content'],
-                            self.clients[client]['name'] + ": ")
-                    if data['type'] == "command":
-                        command = data['content'].split(" ", 1)
-                        if command[0] == "cn":
-                            self.command_change_nickname(client, command[1])
-                        elif command[0] == "h":
-                            self.command_help(client)
-                        elif command[0] == "l":
-                            self.command_login(client, command[1])
-                        elif command[0] == "ca":
-                            self.command_create_account(client, command[1])
-                        elif not self.clients[client]['name']:
-                            err += 1
-                            if err == 1:
-                                self.send(
-                                    "Type {csep}h for help.",
-                                    client, attrib=['csep'])
-                            elif err == 2:
-                                self.send(
-                                    "Last chance. Type {csep}h.",
-                                    client, attrib=['csep'])
-                            elif err == 3:
-                                raise ConnectionRefusedError
-                            continue
-                        elif command[0] == "a":
-                            self.command_list_all(client)
-                        elif command[0] == "cap":
-                            self.command_change_password(client, command[1])
-                        elif command[0] == "ra":
-                            self.command_remove_account(client, command[1])
-                        elif command[0] == "pm":
-                            self.command_private_message(client, command[1])
-                        elif command[0] == "sn":
-                            self.command_server_name(client, command[1])
-                        elif command[0] == "ss":
-                            self.command_server_message(client, command[1])
-                        else:
-                            self.send(f"Unknown command: ':{command}'", client)
-                    if data['type'] == "control":
-                        if "alive" in data['attrib']:
-                            pass
-                    timeout = False
-                else:
-                    if timeout:
-                        raise ConnectionError
+                data = await asyncio.wait_for(
+                    self.loop.sock_recv(client, self.buffer), 1)
+                if not data:
+                    raise ConnectionResetError
+                data = json.loads(data.decode("utf8"))
+                if data['type'] == "message":
+                    if not self.clients[client]['name']:
+                        err += 1
+                        if err == 1:
+                            await self.send(
+                                client,
+                                "Type {csep}h for help.",
+                                attrib='csep')
+                        elif err == 2:
+                            await self.send(
+                                client,
+                                "Last chance. Type {csep}h.",
+                                attrib='csep')
+                        elif err == 3:
+                            raise ConnectionRefusedError
+                        continue
+                    await self.broadcast(
+                        data['content'],
+                        prefix=self.clients[client]['name'] + ": ")
+                if data['type'] == "command":
+                    command = data['content'].split(" ", 1)
+                    if command[0] == "cn":
+                        await self.command_change_nickname(
+                            client, command[1])
+                    elif command[0] == "h":
+                        await self.command_help(client)
+                    elif command[0] == "l":
+                        await self.command_login(client, command[1])
+                    elif command[0] == "ca":
+                        await self.command_create_account(
+                            client, command[1])
+                    elif not self.clients[client]['name']:
+                        err += 1
+                        if err == 1:
+                            await self.send(
+                                client,
+                                "Type {csep}h for help.",
+                                attrib='csep')
+                        elif err == 2:
+                            await self.send(
+                                client,
+                                "Last chance. Type {csep}h.",
+                                attrib='csep')
+                        elif err == 3:
+                            raise ConnectionRefusedError
+                        continue
+                    elif command[0] == "a":
+                        await self.command_list_all(client)
+                    elif command[0] == "cap":
+                        await self.command_change_password(client, command[1])
+                    elif command[0] == "ra":
+                        await self.command_remove_account(client, command[1])
+                    elif command[0] == "pm":
+                        await self.command_private_message(client, command[1])
+                    elif command[0] == "sn":
+                        await self.command_server_name(client, command[1])
+                    elif command[0] == "ss":
+                        await self.command_server_message(
+                            client, command[1])
                     else:
-                        self.send("", client, "control", ['alive'])
-                        timeout = True
+                        await self.send(
+                            client,
+                            "Unknown command: '{csep}" f"{command[0]}'",
+                            attrib="csep")
+                if data['type'] == "control":
+                    if data['attrib'] == 'alive':
+                        pass
+                timeout = 0
+            except asyncio.TimeoutError:
+                if timeout == self.timeout//2:
+                    await self.send(client, "", "control", 'alive')
+                elif timeout < self.timeout:
+                    timeout += 1
+                else:
+                    await self.client_error(
+                        client,
+                        f"{self.clients[client]['address'][0]}:"
+                        f"{self.clients[client]['address'][1]} hit timeout "
+                        "limit and was disconnected.",
+                        f"'{self.clients[client]['name']}' timed out.")
+                    break
             except (ConnectionAbortedError, ConnectionResetError):
-                self.client_error(
+                await self.client_error(
                     client,
                     f"{self.clients[client]['address'][0]}:"
                     f"{self.clients[client]['address'][1]} disconnected.",
                     f"'{self.clients[client]['name']}' left chat.")
                 break
             except BrokenPipeError:
-                self.client_error(
+                await self.client_error(
                     client,
                     "Connection lost with "
                     f"{self.clients[client]['address'][0]}:"
@@ -778,7 +824,7 @@ class Server():
                     f"Connection lost with '{self.clients[client]['name']}'.")
                 break
             except ConnectionRefusedError:
-                self.client_error(
+                await self.client_error(
                     client,
                     f"{self.clients[client]['address'][0]}:"
                     f"{self.clients[client]['address'][1]}"
@@ -786,22 +832,14 @@ class Server():
                     "Either they didn't understand or it was an attack.")
                 break
             except (UnicodeDecodeError, json.JSONDecodeError):
-                self.client_error(
+                await self.client_error(
                     client,
                     f"{self.clients[client]['address'][0]}:"
                     f"{self.clients[client]['address'][1]}"
                     " sent invalid characters and was disconnected.")
                 break
-            except ConnectionError:
-                self.client_error(
-                    client,
-                    f"{self.clients[client]['address'][0]}:"
-                    f"{self.clients[client]['address'][1]} hit timeout "
-                    "limit and was disconnected.",
-                    f"'{self.clients[client]['name']}' timed out.")
-                break
             except IndexError:
-                self.send("Invalid command arguments", client)
+                await self.send(client, "Invalid command arguments")
 
 
 def parse_args():
