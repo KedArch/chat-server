@@ -4,10 +4,11 @@ import sys
 import json
 import shlex
 import signal
+import argparse
 import sqlite3
 import hashlib
-import argparse
 import datetime
+import importlib
 import asyncio
 from asyncio.selector_events import ssl
 from asyncio.selector_events import socket
@@ -23,6 +24,8 @@ class Server():
         self.host = "0.0.0.0"
         self.port = 1111
         self.timeout = 60.0  # Better if >= 30.0
+        self.plugins_path = self.basedir + os.path.sep + "plugins"
+        self.plugins_command = {}
         self.logfile = None
         self.sname = "Server"
         self.maxchars = 30
@@ -160,8 +163,30 @@ class Server():
                         self.logtype[3])
                     self.db[0].close()
 
+    async def load_plugins(self):
+        sys.path.insert(0, self.plugins_path)
+        for file_ in os.listdir(self.plugins_path):
+            fileext = os.path.splitext(file_)[1].replace(".", "").lower()
+            filename = os.path.splitext(file_)[0]
+            if fileext == "py":
+                plugin = importlib.import_module(
+                    f"plugins.{filename}", ".").Plugin()
+                if plugin.type == "startup":
+                    await plugin.execute(self)
+                elif plugin.type == "command":
+                    if plugin.command in self.plugins_command:
+                        print(
+                            "Two plugins want to use the same command  "
+                            "shortcut. Resolve the issue and start "
+                            "again.")
+                        self.exit(70)
+                    self.help["{csep}"+plugin.command] = plugin.help
+                    self.plugins_command[plugin.command.split(" ")[0]] = plugin
+        sys.path.pop(0)
+
     def start(self, foreground=False, log=None, overwrite=False,
-              append=False, key=None, cert=None, passwd=None):
+              append=False, key=None, cert=None, passwd=None,
+              no_plugins=False):
         """
         Checks conditions and initializes server
         """
@@ -222,6 +247,7 @@ class Server():
         addr = (self.host, self.port)
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server.setblocking(False)
         try:
             self.server.bind(addr)
         except OSError:
@@ -243,10 +269,10 @@ class Server():
             str(datetime.datetime.now())),
             self.logtype[0])
         self.db_check()
-        self.server.setblocking(False)
-        self.server.listen()
         self.logging("Waiting for connections...", self.logtype[1])
         self.loop = asyncio.get_event_loop()
+        if not no_plugins:
+            self.loop.create_task(self.load_plugins())
         self.loop.run_until_complete(self.accept_connections())
 
     async def send(self, client, content, mtype="message", attrib=""):
@@ -291,6 +317,7 @@ class Server():
         """
         Handles first time connection
         """
+        self.server.listen()
         while True:
             client, address = await self.loop.sock_accept(self.server)
             if self.ssl_context:
@@ -436,7 +463,7 @@ class Server():
             await self.send(
                 client,
                 "Arguments with '$' may be handled by client "
-                "differently:\n")
+                "differently")
 
     async def command_list_all(self, client):
         """
@@ -697,6 +724,11 @@ class Server():
                     f"Sorry, max {self.maxchars} characters for username"
                     " and nick")
                 return
+            if command in self.reserved:
+                await self.send(
+                    client,
+                    f"Sorry, {command} is being used by someone")
+                return
             self.sname = command
             await self.broadcast(
                 self.sname, mtype="control", attrib="sname", to_all=True)
@@ -787,6 +819,9 @@ class Server():
                     elif command[0] == "ss":
                         await self.command_server_message(
                             client, command[1])
+                    elif command[0] in self.plugins_command:
+                        await self.plugins_command[command[0]].execute(
+                            self, client, command[1])
                     else:
                         await self.send(
                             client,
@@ -853,7 +888,7 @@ def parse_args():
         epilog="Error codes and their "
                "element:\n65 - log\n66 - socket\n67 - certfile or "
                "keyfile (or its password)\n68 - mutually exclusive arguments\n"
-               "69 - user database error")
+               "69 - user database error\n70 - plugin load error")
     parser.add_argument(
         "-f", "--foreground", action="store_true",
         required=not {"-l", "--log"} &
@@ -895,10 +930,13 @@ def parse_args():
         help="password to private key. WARNING! This option is "
         "insecure. If not given will be asked for it at server start "
         "if needed.")
+    parser.add_argument(
+        "-n", "--no_plugins", action="store_true", default=False,
+        help="do not load plugins.")
     args = parser.parse_args()
     Server().start(
         args.foreground, args.log, args.overwrite, args.append,
-        args.key, args.cert, args.passwd)
+        args.key, args.cert, args.passwd, args.no_plugins)
 
 
 if __name__ == "__main__":
