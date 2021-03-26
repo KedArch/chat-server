@@ -165,7 +165,7 @@ class Server():
 
     async def load_plugins(self):
         sys.path.insert(0, self.plugins_path)
-        for file_ in os.listdir(self.plugins_path):
+        for file_ in sorted(os.listdir(self.plugins_path)):
             fileext = os.path.splitext(file_)[1].replace(".", "").lower()
             filename = os.path.splitext(file_)[0]
             if fileext == "py":
