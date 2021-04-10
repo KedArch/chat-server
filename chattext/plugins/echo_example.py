@@ -1,9 +1,14 @@
 class Plugin():  # required class name
     def __init__(self):
         # this function should only contain start variables
-        # command or startup
+        # command/startup
+        # command handles shortcuts, command arguments as string
+        # startup is executed at startup, before accepting connections
         self.type = "command"
-        # both can be omitted when type is startup
+        # advertise new usable groups, usefull only in type command
+        # if no groups are used use empty set as below
+        self.groups = set()
+        # both can be omitted when type is startup or before_command
         # they are used for completion
         # parameter names (starting with "$") can be added after space
         self.command = "e $string"

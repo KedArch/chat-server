@@ -8,11 +8,15 @@ import argparse
 import sqlite3
 import hashlib
 import datetime
+import traceback
 import importlib
 import asyncio
 from asyncio.selector_events import ssl
 from asyncio.selector_events import socket
 
+#TODO
+#-try except when loading plugins (only at load_plugins) and info (added names)
+#-fix exiting from load_plugins
 
 class Server():
     """
@@ -29,6 +33,8 @@ class Server():
         self.logfile = None
         self.sname = "Server"
         self.maxchars = 30
+        self.ssl_context = None
+        self.clients = {}
         self.reserved = set()
         self.welcome = "Welcome on this server!\nGive "\
                        "yourself a nickname or log in so others "\
@@ -42,16 +48,14 @@ class Server():
             "{csep}ra $pass $user": "remove account (when logged in)",
             "{csep}pm $nick $message": "send private message to someone "
             "online (also to guests)",
-            "{csep}sn $sname": "change server name in chat",
-            "{csep}ss $message": "say as server"
+            "{csep}g": "show your groups"
         }
-        self.groups = ("guest", "user", "admin")
+        self.groups = {"guest", "user", "admin"}
         self.logtype = ("END", "LOG", "CHAT", "ERR")
         self.logsep = 0
         for i in self.logtype:
             if len(i) > self.logsep:
                 self.logsep = len(i)
-        self.ssl_context = None
         signal.signal(signal.SIGTERM, self.exit)
         signal.signal(signal.SIGINT, self.exit)
 
@@ -60,13 +64,15 @@ class Server():
         Handles exit signal
         """
         try:
-            if self.foreground:
+            if self.foreground and signum != 70:
                 print()
+            self.logging("Requesting shutdown.", self.logtype[1])
             self.db_check(True)
             self.logging("<<Logging ended at {}>>".format(
                 str(datetime.datetime.now())),
                 self.logtype[0])
-            self.logfile.close()
+            if self.logfile:
+                self.logfile.close()
             self.server.close()
         finally:
             sys.exit(signum)
@@ -165,23 +171,45 @@ class Server():
 
     async def load_plugins(self):
         sys.path.insert(0, self.plugins_path)
-        for file_ in sorted(os.listdir(self.plugins_path)):
-            fileext = os.path.splitext(file_)[1].replace(".", "").lower()
-            filename = os.path.splitext(file_)[0]
+        for pfile in sorted(os.listdir(self.plugins_path)):
+            fileext = os.path.splitext(pfile)[1].replace(".", "").lower()
+            filename = os.path.splitext(pfile)[0]
             if fileext == "py":
                 plugin = importlib.import_module(
-                    f"plugins.{filename}", ".").Plugin()
+                    f"{filename}", "plugins").Plugin()
                 if plugin.type == "startup":
-                    await plugin.execute(self)
+                    try:
+                        await plugin.execute(self)
+                        self.logging(
+                            f"Loaded startup plugin '{plugin.__module__}'",
+                            self.logtype[1])
+                    except Exception:
+                        self.logging(
+                            f"Uncaught exception in plugin "
+                            f"'{plugin.__module__}':\n"
+                            f"{traceback.format_exc()}",
+                            self.logtype[3])
                 elif plugin.type == "command":
-                    if plugin.command in self.plugins_command:
-                        print(
-                            "Two plugins want to use the same command  "
-                            "shortcut. Resolve the issue and start "
-                            "again.")
+                    command = plugin.command.split()[0]
+                    if command in self.plugins_command:
+                        self.logging(
+                              f"Plugin '{plugin.__module__}' "
+                              "tried to use command "
+                              f"'{command}' reserved for plugin "
+                              f"'{self.plugins_command[command].__module__}'"
+                              ". Resolve the conflict and start again.",
+                              self.logtype[3])
                         self.exit(70)
-                    self.help["{csep}"+plugin.command] = plugin.help
-                    self.plugins_command[plugin.command.split(" ")[0]] = plugin
+                    self.help["{csep}"+plugin.command] = plugin.help\
+                            + f"\n  (part of plugin '{plugin.__module__}')"
+                    self.plugins_command[
+                        plugin.command.split(" ")[0]] = plugin
+                    for i in plugin.groups:
+                        self.groups.add(i)
+                    self.logging(
+                            f"Loaded command plugin '{plugin.__module__}'"
+                            f" registered for '{command}'",
+                            self.logtype[1])
         sys.path.pop(0)
 
     def start(self, foreground=False, log=None, overwrite=False,
@@ -243,18 +271,6 @@ class Server():
                 sys.exit(65)
         self.foreground = foreground
         self.log = log
-        self.clients = {}
-        addr = (self.host, self.port)
-        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server.setblocking(False)
-        try:
-            self.server.bind(addr)
-        except OSError:
-            print(f"{addr[0]}:{addr[1]} is being used!")
-            if self.logfile:
-                self.logfile.close()
-            sys.exit(66)
         if not foreground:
             pid = os.fork()
             if pid > 0:
@@ -269,10 +285,24 @@ class Server():
             str(datetime.datetime.now())),
             self.logtype[0])
         self.db_check()
-        self.logging("Waiting for connections...", self.logtype[1])
         self.loop = asyncio.get_event_loop()
         if not no_plugins:
-            self.loop.create_task(self.load_plugins())
+            try:
+                self.loop.run_until_complete(self.load_plugins())
+            except SystemExit:
+                return
+        addr = (self.host, self.port)
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server.setblocking(False)
+        try:
+            self.server.bind(addr)
+        except OSError:
+            print(f"{addr[0]}:{addr[1]} is being used!")
+            if self.logfile:
+                self.logfile.close()
+            sys.exit(66)
+        self.logging("Waiting for connections...", self.logtype[1])
         self.loop.run_until_complete(self.accept_connections())
 
     async def send(self, client, content, mtype="message", attrib=""):
@@ -355,7 +385,7 @@ class Server():
                 continue
             self.clients[client] = {
                 "address": address,
-                "group": self.groups[0],
+                "group": ["guest"],
                 "user": None,
                 "name": None
             }
@@ -440,10 +470,12 @@ class Server():
                     " (Internal server error)")
         if name in self.reserved:
             self.reserved.remove(name)
+        user = "|"+self.clients[client]['user'] if \
+                self.clients[client]['user'] else ""
         await self.send(
             client,
-            f"{self.clients[client]['name']}|{self.clients[client]['user']}"
-            f"|{self.clients[client]['group']}", "control", "client")
+            f"{self.clients[client]['name']}{user}",
+            "control", "client")
         self.reserved.add(self.clients[client]['name'])
         await self.broadcast(msg)
 
@@ -483,7 +515,6 @@ class Server():
             await self.send(client, "---Online---")
             were = []
             for nextclient in self.clients.keys():
-                user = self.clients[nextclient]['group'].ljust(glen)
                 if self.clients[nextclient]['name'] == \
                         self.clients[client]['name']:
                     user += " ! "
@@ -536,10 +567,10 @@ class Server():
                     await self.broadcast(f"'{i[3]}' logged in.")
                 self.clients[client]['user'] = user
                 self.clients[client]['name'] = i[3]
-                self.clients[client]['group'] = i[2]
+                self.clients[client]['group'] = i[2].split(",")
                 await self.send(
                     client,
-                    f"{i[3]}|{user}|{i[2]}", "control", "client")
+                    f"{i[3]}|{user}", "control", "client")
                 break
         else:
             await self.send(client, "Invalid username or password")
@@ -561,7 +592,7 @@ class Server():
                 "Sorry, no spaces in usernames")
             return
         elif user in ("None"):
-            await self.send(client, "Haha, very funny")
+            await self.send(client, "Username is restricted.")
             return
         password = hashlib.sha512(
             bytes(shlex.split(command)[1], "utf8")).hexdigest()
@@ -600,10 +631,10 @@ class Server():
                 await self.broadcast(f"'{user}' logged in.")
             self.clients[client]['user'] = user
             self.clients[client]['name'] = user
-            self.clients[client]['group'] = self.groups[1]
+            self.clients[client]['group'] = ["user"]
             await self.send(
                 client,
-                f"{user}|{user}|{self.groups[1]}", "control", "client")
+                f"{user}|{user}", "control", "client")
             self.reserved.add(user)
 
     async def command_change_password(self, client, command):
@@ -684,9 +715,10 @@ class Server():
                     "account.",
                     self.logtype[1])
                 self.clients[client]['user'] = None
+                self.clients[client]['group'] = ["guest"]
                 await self.send(
                     client,
-                    f"{self.clients[client]['name']}|None|guest",
+                    f"{self.clients[client]['name']}",
                     "control", "client")
             else:
                 await self.send(client, "Invalid password or username")
@@ -716,36 +748,9 @@ class Server():
         await self.send(priv, msg)
         await self.send(client, msg)
 
-    async def command_server_name(self, client, command):
-        if self.clients[client]['group'] == "admin":
-            if len(command) > self.maxchars:
-                await self.send(
-                    client,
-                    f"Sorry, max {self.maxchars} characters for username"
-                    " and nick")
-                return
-            if command in self.reserved:
-                await self.send(
-                    client,
-                    f"Sorry, {command} is being used by someone")
-                return
-            self.sname = command
-            await self.broadcast(
-                self.sname, mtype="control", attrib="sname", to_all=True)
-            await self.broadcast(
-                f"Server now calls itself '{command}'")
-        else:
-            await self.send(
-                client,
-                "You do not have required group for this action: 'admin'")
-
-    async def command_server_message(self, client, command):
-        if self.clients[client]['group'] == "admin":
-            await self.broadcast(command)
-        else:
-            await self.send(
-                client,
-                "You do not have required group for this action: 'admin'")
+    async def command_groups(self, client):
+        for i in self.clients[client]['group']:
+            await self.send(client, i)
 
     async def handle_connected(self, client):
         """
@@ -814,14 +819,25 @@ class Server():
                         await self.command_remove_account(client, command[1])
                     elif command[0] == "pm":
                         await self.command_private_message(client, command[1])
-                    elif command[0] == "sn":
-                        await self.command_server_name(client, command[1])
-                    elif command[0] == "ss":
-                        await self.command_server_message(
-                            client, command[1])
+                    elif command[0] == "g":
+                        await self.command_groups(client)
                     elif command[0] in self.plugins_command:
-                        await self.plugins_command[command[0]].execute(
-                            self, client, command[1])
+                        plugin = self.plugins_command[command[0]]
+                        try:
+                            await plugin.execute(
+                                self, client, command[1])
+                        except Exception:
+                            self.logging(
+                                f"Uncaught exception in plugin "
+                                f"'{plugin.__module__}' used by "
+                                f"{self.clients[client]['address'][0]}:"
+                                f"{self.clients[client]['address'][1]}"
+                                f":\n{traceback.format_exc()}",
+                                self.logtype[3])
+                            await self.send(
+                                client,
+                                f"Plugin '{plugin.__module__}' failed!\n"
+                                "Please report it to server administration.")
                     else:
                         await self.send(
                             client,
