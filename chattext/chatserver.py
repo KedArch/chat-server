@@ -44,7 +44,6 @@ class Server():
             "{csep}ra $pass $user": "remove account (when logged in)",
             "{csep}pm $nick $message": "send private message to someone "
             "online (also to guests)",
-            "{csep}g": "show your groups"
         }
         self.groups = {"guest", "user", "admin"}
         self.logtype = ("END", "LOG", "CHAT", "ERR")
