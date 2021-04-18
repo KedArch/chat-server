@@ -14,10 +14,6 @@ import asyncio
 from asyncio.selector_events import ssl
 from asyncio.selector_events import socket
 
-#TODO
-#-try except when loading plugins (only at load_plugins) and info (added names)
-#-fix exiting from load_plugins
-
 class Server():
     """
     Main server class
@@ -502,32 +498,27 @@ class Server():
         Command functionality
         """
         if self.clients:
-            glen = len(self.groups[0])
-            for i in self.groups:
-                if glen < len(i):
-                    glen = i
-            if glen <= 5:
-                glen = 6
             names = list(self.reserved)
             names.sort()
+            await self.send(client, "Server" + f" | {self.sname}")
             await self.send(client, "Client list:")
-            await self.send(client, "Server".ljust(glen) + f" | {self.sname}")
             await self.send(client, "---Online---")
             were = []
             for nextclient in self.clients.keys():
+                user = self.clients[nextclient]['name']
                 if self.clients[nextclient]['name'] == \
                         self.clients[client]['name']:
                     user += " ! "
                 else:
                     user += " | "
-                user += self.clients[nextclient]['name']
+                user += ",".join(self.clients[nextclient]['group'])
                 await self.send(client, user)
                 were.append(self.clients[nextclient]['name'])
             await self.send(client, "---Offline---")
             for i in self.db[1].execute("SELECT nick, sgroup FROM users"):
                 if i[0] in were:
                     continue
-                user = i[1].ljust(glen) + " | " + i[0]
+                user = i[0] + " | " + i[1]
                 await self.send(client, user)
         else:
             await self.send(client, "Nobody is on server now.")
@@ -748,10 +739,6 @@ class Server():
         await self.send(priv, msg)
         await self.send(client, msg)
 
-    async def command_groups(self, client):
-        for i in self.clients[client]['group']:
-            await self.send(client, i)
-
     async def handle_connected(self, client):
         """
         Serves client output
@@ -819,8 +806,6 @@ class Server():
                         await self.command_remove_account(client, command[1])
                     elif command[0] == "pm":
                         await self.command_private_message(client, command[1])
-                    elif command[0] == "g":
-                        await self.command_groups(client)
                     elif command[0] in self.plugins_command:
                         plugin = self.plugins_command[command[0]]
                         try:
