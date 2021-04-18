@@ -62,7 +62,7 @@ class Server():
             if self.foreground and signum != 70:
                 print()
             self.logging("Requesting shutdown.", self.logtype[1])
-            self.db_check(True)
+            self.db_init(True)
             self.logging("<<Logging ended at {}>>".format(
                 str(datetime.datetime.now())),
                 self.logtype[0])
@@ -90,7 +90,7 @@ class Server():
             else:
                 print(longtext + text)
 
-    def db_check(self, close=False):
+    def db_init(self, close=False):
         """
         Check database at server start and stop
         """
@@ -101,7 +101,6 @@ class Server():
                     check_same_thread=False)
                 cur = con.cursor()
                 try:
-                    self.offline = set()
                     for i in cur.execute("SELECT nick FROM users"):
                         self.reserved.add(i[0])
                 except sqlite3.OperationalError:
@@ -163,49 +162,6 @@ class Server():
                         "Couldn't recreate user database. Possibly data loss.",
                         self.logtype[3])
                     self.db[0].close()
-
-    async def load_plugins(self):
-        sys.path.insert(0, self.plugins_path)
-        for pfile in sorted(os.listdir(self.plugins_path)):
-            fileext = os.path.splitext(pfile)[1].replace(".", "").lower()
-            filename = os.path.splitext(pfile)[0]
-            if fileext == "py":
-                plugin = importlib.import_module(
-                    f"{filename}", "plugins").Plugin()
-                if plugin.type == "startup":
-                    try:
-                        await plugin.execute(self)
-                        self.logging(
-                            f"Loaded startup plugin '{plugin.__module__}'",
-                            self.logtype[1])
-                    except Exception:
-                        self.logging(
-                            f"Uncaught exception in plugin "
-                            f"'{plugin.__module__}':\n"
-                            f"{traceback.format_exc()}",
-                            self.logtype[3])
-                elif plugin.type == "command":
-                    command = plugin.command.split()[0]
-                    if command in self.plugins_command:
-                        self.logging(
-                              f"Plugin '{plugin.__module__}' "
-                              "tried to use command "
-                              f"'{command}' reserved for plugin "
-                              f"'{self.plugins_command[command].__module__}'"
-                              ". Resolve the conflict and start again.",
-                              self.logtype[3])
-                        self.exit(70)
-                    self.help["{csep}"+plugin.command] = plugin.help\
-                            + f"\n  (part of plugin '{plugin.__module__}')"
-                    self.plugins_command[
-                        plugin.command.split(" ")[0]] = plugin
-                    for i in plugin.groups:
-                        self.groups.add(i)
-                    self.logging(
-                            f"Loaded command plugin '{plugin.__module__}'"
-                            f" registered for '{command}'",
-                            self.logtype[1])
-        sys.path.pop(0)
 
     def start(self, foreground=False, log=None, overwrite=False,
               append=False, key=None, cert=None, passwd=None,
@@ -279,7 +235,7 @@ class Server():
         self.logging("<<Logging started at {}>>".format(
             str(datetime.datetime.now())),
             self.logtype[0])
-        self.db_check()
+        self.db_init()
         self.loop = asyncio.get_event_loop()
         if not no_plugins:
             try:
@@ -299,6 +255,57 @@ class Server():
             sys.exit(66)
         self.logging("Waiting for connections...", self.logtype[1])
         self.loop.run_until_complete(self.accept_connections())
+
+    async def load_plugins(self):
+        sys.path.insert(0, self.plugins_path)
+        for pfile in sorted(os.listdir(self.plugins_path)):
+            fileext = os.path.splitext(pfile)[1].replace(".", "").lower()
+            filename = os.path.splitext(pfile)[0]
+            if fileext == "py":
+                try:
+                    plugin = importlib.import_module(
+                        f"{filename}", "plugins").Plugin()
+                except Exception:
+                    self.logging(
+                        f"Omitting plugin '{filename}' with "
+                        f"uncaught exception:\n"
+                        f"{traceback.format_exc()}",
+                        self.logtype[3])
+                    continue
+                if plugin.type == "startup":
+                    try:
+                        await plugin.execute(self)
+                        self.logging(
+                            f"Loaded startup plugin '{filename}'",
+                            self.logtype[1])
+                    except Exception:
+                        self.logging(
+                            f"Uncaught exception in plugin "
+                            f"'{filename}':\n"
+                            f"{traceback.format_exc()}",
+                            self.logtype[3])
+                elif plugin.type == "command":
+                    command = plugin.command.split()[0]
+                    if command in self.plugins_command:
+                        self.logging(
+                              f"Plugin '{filename}' "
+                              "tried to use command "
+                              f"'{command}' reserved for plugin "
+                              f"'{self.plugins_command[command].__module__}'"
+                              ". Resolve the conflict and start again.",
+                              self.logtype[3])
+                        self.exit(70)
+                    self.help["{csep}"+plugin.command] = plugin.help\
+                            + f"\n  (part of plugin '{filename}')"
+                    self.plugins_command[
+                        plugin.command.split(" ")[0]] = plugin
+                    for i in plugin.groups:
+                        self.groups.add(i)
+                    self.logging(
+                            f"Loaded command plugin '{filename}'"
+                            f" registered for '{command}'",
+                            self.logtype[1])
+        sys.path.pop(0)
 
     async def send(self, client, content, mtype="message", attrib=""):
         """
@@ -807,9 +814,10 @@ class Server():
                         await self.command_private_message(client, command[1])
                     elif command[0] in self.plugins_command:
                         plugin = self.plugins_command[command[0]]
+                        command = command[1]
                         try:
                             await plugin.execute(
-                                self, client, command[1])
+                                self, client, command)
                         except Exception:
                             self.logging(
                                 f"Uncaught exception in plugin "
@@ -876,6 +884,20 @@ class Server():
                 break
             except IndexError:
                 await self.send(client, "Invalid command arguments")
+            except Exception:
+                await self.client_error(
+                    client,
+                    f"{self.clients[client]['address'][0]}:"
+                    f"{self.clients[client]['address'][1]}"
+                    " was disconnected because of uncaught exception.")
+                await self.send(
+                    client,
+                    "You were disconnected from server because in your"
+                    " connection occured uncaught exception. Please "
+                    "report it to server administration. You can "
+                    "reconnect and try to not use functionality that"
+                    " caused this message to appear until it is fixed.")
+                break
 
 
 def parse_args():
