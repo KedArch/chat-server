@@ -236,7 +236,7 @@ class Server():
             str(datetime.datetime.now())),
             self.logtype[0])
         self.db_init()
-        self.loop = asyncio.get_event_loop()
+        self.loop = asyncio.new_event_loop()
         if not no_plugins:
             try:
                 self.loop.run_until_complete(self.load_plugins())
