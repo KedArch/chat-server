@@ -11,8 +11,8 @@ import datetime
 import traceback
 import importlib
 import asyncio
-from asyncio.selector_events import ssl
-from asyncio.selector_events import socket
+import ssl
+import socket
 
 class Server():
     """
@@ -36,13 +36,13 @@ class Server():
                        "yourself a nickname or log in so others "\
                        "can recognize you!"
         self.help = {
-            "{csep}a": "list all clients ('!' indicates you instead of '|')",
-            "{csep}cn $nick": "change nickname (saved if logged in)",
-            "{csep}l $user $pass": "log in",
-            "{csep}ca $user $pass": "create account",
-            "{csep}cap $pass $newpass": "change password (when logged in)",
-            "{csep}ra $pass $user": "remove account (when logged in)",
-            "{csep}pm $nick $message": "send private message to someone "
+            "/a": "list all clients ('!' indicates you instead of '|')",
+            "/cn $nick": "change nickname (saved if logged in)",
+            "/l $user $pass": "log in",
+            "/ca $user $pass": "create account",
+            "/cap $pass $newpass": "change password (when logged in)",
+            "/ra $pass $user": "remove account (when logged in)",
+            "/pm $nick $message": "send private message to someone "
             "online (also to guests)",
         }
         self.groups = {"guest", "user", "admin"}
@@ -264,12 +264,10 @@ class Server():
             if fileext == "py":
                 try:
                     plugin = importlib.import_module(
-                        f"{filename}", "plugins").Plugin()
+                        filename, "plugins").Plugin()
                 except Exception:
                     self.logging(
-                        f"Omitting plugin '{filename}' with "
-                        f"uncaught exception:\n"
-                        f"{traceback.format_exc()}",
+                        f"Omitting plugin '{filename}' with uncaught exception:\n{traceback.format_exc()}",
                         self.logtype[3])
                     continue
                 if plugin.type == "startup":
@@ -280,30 +278,23 @@ class Server():
                             self.logtype[1])
                     except Exception:
                         self.logging(
-                            f"Uncaught exception in plugin "
-                            f"'{filename}':\n"
-                            f"{traceback.format_exc()}",
+                            f"Uncaught exception in plugin '{filename}':\n{traceback.format_exc()}",
                             self.logtype[3])
                 elif plugin.type == "command":
                     command = plugin.command.split()[0]
                     if command in self.plugins_command:
                         self.logging(
-                              f"Plugin '{filename}' "
-                              "tried to use command "
-                              f"'{command}' reserved for plugin "
-                              f"'{self.plugins_command[command].__module__}'"
-                              ". Resolve the conflict and start again.",
+                              f"Plugin '{filename}' tried to use command '{command}' reserved for plugin "
+                              f"'{self.plugins_command[command].__module__}'. Resolve the conflict and start again.",
                               self.logtype[3])
                         self.exit(70)
-                    self.help["{csep}"+plugin.command] = plugin.help\
-                            + f"\n  (part of plugin '{filename}')"
+                    self.help[f"/{plugin.command}"] = f"{plugin.help}\n  (part of plugin '{filename}')"
                     self.plugins_command[
                         plugin.command.split(" ")[0]] = plugin
                     for i in plugin.groups:
                         self.groups.add(i)
                     self.logging(
-                            f"Loaded command plugin '{filename}'"
-                            f" registered for '{command}'",
+                            f"Loaded command plugin '{filename}' registered for '{command}'",
                             self.logtype[1])
         sys.path.pop(0)
 
@@ -340,8 +331,7 @@ class Server():
         for sock in errcl:
             await self.client_error(
                 sock,
-                f"Connection lost with {self.clients[sock]['address'][0]}"
-                f": {self.clients[sock]['address'][1]}.",
+                f"Connection lost with {self.clients[sock]['address'][0]}: {self.clients[sock]['address'][1]}.",
                 f"Connection lost with '{self.clients[sock]['name']}'.")
             await asyncio.sleep(0)
 
@@ -358,8 +348,7 @@ class Server():
                             client, server_side=True)
                 except (ssl.SSLError, OSError):
                     self.logging(
-                        f"{address[0]}:{address[1]} SSL handshake "
-                        "failed or disconnected", self.logtype[1])
+                        f"{address[0]}:{address[1]} SSL handshake failed or disconnected", self.logtype[1])
                     continue
             self.logging(f"{address[0]}:{address[1]} connected.",
                          self.logtype[1])
@@ -382,8 +371,7 @@ class Server():
                 await self.send(client, self.welcome, "message", "welcome")
             except Exception:
                 await self.client_error(
-                    client, "Failed to communicate with "
-                    f"{address[0]}:{address[1]}, disconnecting.")
+                    client, f"Failed to communicate with {address[0]}:{address[1]}, disconnecting.")
                 continue
             self.clients[client] = {
                 "address": address,
@@ -422,8 +410,7 @@ class Server():
         if name in self.reserved:
             await self.send(
                 client,
-                "This nickname is already"
-                f" taken: '{name}'")
+                f"This nickname is already taken: '{name}'")
             return
         elif not name:
             await self.send(
@@ -436,11 +423,9 @@ class Server():
         if len(name) > self.maxchars:
             await self.send(
                 client,
-                f"Sorry, max {self.maxchars} characters for username"
-                " and nick")
+                f"Sorry, max {self.maxchars} characters for username and nick")
             return
-        self.clients[client]['name'], name = name,\
-            self.clients[client]['name']
+        self.clients[client]['name'], name = name, self.clients[client]['name']
         if not name:
             self.logging(
                 f"{self.clients[client]['address'][0]}"
@@ -448,8 +433,7 @@ class Server():
                 " took nickname "
                 f"'{self.clients[client]['name']}'",
                 self.logtype[1])
-            msg = f"'{self.clients[client]['name']}' "\
-                  "connected to chat!"
+            msg = f"'{self.clients[client]['name']}' connected to chat!"
         else:
             self.logging(
                 f"{self.clients[client]['address'][0]}"
@@ -487,13 +471,13 @@ class Server():
         """
         if completion:
             for i in self.help.keys():
-                await self.send(client, i, "control", 'csep')
+                await self.send(client, i, "control", 'command')
         else:
             await self.send(client, "Server commands:")
             for i in self.help.keys():
                 await self.send(
                     client,
-                    f"{i} - {self.help[i]}", "message", 'csep')
+                    f"{i} - {self.help[i]}", "message", '/')
             await self.send(
                 client,
                 "Arguments with '$' may be handled by client "
@@ -764,13 +748,11 @@ class Server():
                         if err == 1:
                             await self.send(
                                 client,
-                                "Type {csep}h for help.",
-                                attrib='csep')
+                                "Type /h for help.")
                         elif err == 2:
                             await self.send(
                                 client,
-                                "Last chance. Type {csep}h.",
-                                attrib='csep')
+                                "Last chance. Type /h.")
                         elif err == 3:
                             raise ConnectionRefusedError
                         continue
@@ -794,13 +776,11 @@ class Server():
                         if err == 1:
                             await self.send(
                                 client,
-                                "Type {csep}h for help.",
-                                attrib='csep')
+                                "Type /h for help.")
                         elif err == 2:
                             await self.send(
                                 client,
-                                "Last chance. Type {csep}h.",
-                                attrib='csep')
+                                "Last chance. Type /h.")
                         elif err == 3:
                             raise ConnectionRefusedError
                         continue
@@ -833,8 +813,7 @@ class Server():
                     else:
                         await self.send(
                             client,
-                            "Unknown command: '{csep}" f"{command[0]}'",
-                            attrib="csep")
+                            "Unknown command: '/" f"{command[0]}'")
                 if data['type'] == "control":
                     if data['attrib'] == 'alive':
                         pass
