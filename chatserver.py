@@ -490,7 +490,7 @@ class Server():
         if self.clients:
             names = list(self.reserved)
             names.sort()
-            await self.send(client, "Server" + f" | {self.sname}")
+            await self.send(client, f"Server | {self.sname}")
             await self.send(client, "Client list:")
             await self.send(client, "---Online---")
             were = []
@@ -530,8 +530,7 @@ class Server():
             if user == i[0] and password == i[1]:
                 await self.send(
                     client,
-                    "Succesfully logged in as user "
-                    f"'{user}' aka '{i[3]}'")
+                    f"Succesfully logged in as user '{user}' aka '{i[3]}'")
                 self.logging(
                     f"{self.clients[client]['address'][0]}:"
                     f"{self.clients[client]['address'][1]} "
@@ -564,8 +563,7 @@ class Server():
         if len(user) > self.maxchars:
             await self.send(
                 client,
-                f"Sorry, max {self.maxchars} characters for username"
-                " and nick")
+                f"Sorry, max {self.maxchars} characters for username and nick")
             return
         elif " " in user:
             await self.send(
@@ -649,8 +647,7 @@ class Server():
                 self.logging(
                     f"{self.clients[client]['address'][0]}:"
                     f"{self.clients[client]['address'][1]} "
-                    f"changed user '{self.clients[client]['user']}' "
-                    "password.",
+                    f"changed user '{self.clients[client]['user']}' password.",
                     self.logtype[1])
             else:
                 await self.send(client, "Invalid password")
@@ -679,8 +676,7 @@ class Server():
                     f"'{self.clients[client]['user']}'").fetchone()[0]:
                 try:
                     self.db[1].execute(
-                        "DELETE FROM users "
-                        f"WHERE user = '{self.clients[client]['user']}'")
+                        f"DELETE FROM users WHERE user = '{self.clients[client]['user']}'")
                 except sqlite3.OperationalError:
                     await self.send(
                         client,
@@ -692,8 +688,7 @@ class Server():
                 self.logging(
                     f"{self.clients[client]['address'][0]}:"
                     f"{self.clients[client]['address'][1]} "
-                    f"removed user '{self.clients[client]['user']}' "
-                    "account.",
+                    f"removed user '{self.clients[client]['user']}' account.",
                     self.logtype[1])
                 self.clients[client]['user'] = None
                 self.clients[client]['group'] = ["guest"]
@@ -813,7 +808,7 @@ class Server():
                     else:
                         await self.send(
                             client,
-                            "Unknown command: '/" f"{command[0]}'")
+                            f"Unknown command: '/{command[0]}'")
                 if data['type'] == "control":
                     if data['attrib'] == 'alive':
                         pass
